@@ -79,24 +79,29 @@ describe("validateBotToken", () => {
 // ─── buildAccessJson ─────────────────────────────────────────────────────────
 
 describe("buildAccessJson", () => {
-  it("should produce valid JSON with user and chat IDs", () => {
+  it("should produce valid JSON with dmPolicy and groups", () => {
     const json = buildAccessJson("12345", "-100987654321");
     const parsed = JSON.parse(json);
 
-    expect(parsed.forum_chat_id).toBe("-100987654321");
-    expect(parsed.allowed_users).toEqual([12345]);
-    expect(parsed.allowFrom).toContain(-100987654321);
-    expect(parsed.allowFrom).toContain(12345);
+    expect(parsed.dmPolicy).toBe("allowlist");
+    expect(parsed.allowFrom).toEqual(["12345"]);
+    expect(parsed.groups).toBeDefined();
+    expect(parsed.groups["-100987654321"]).toBeDefined();
+    expect(parsed.groups["-100987654321"].requireMention).toBe(false);
+    expect(parsed.groups["-100987654321"].allowFrom).toEqual([]);
   });
 
-  it("should include topic_id when provided", () => {
+  it("should produce consistent format regardless of topic_id", () => {
     const json = buildAccessJson("12345", "-100987654321", 42);
     const parsed = JSON.parse(json);
 
-    expect(parsed.topic_id).toBe(42);
+    // Topic ID is not needed in access.json — each bot only responds
+    // to the group it's configured for
+    expect(parsed.dmPolicy).toBe("allowlist");
+    expect(parsed.groups["-100987654321"]).toBeDefined();
   });
 
-  it("should not include topic_id when not provided", () => {
+  it("should not include topic_id (not needed for one-bot-per-agent)", () => {
     const json = buildAccessJson("12345", "-100987654321");
     const parsed = JSON.parse(json);
 

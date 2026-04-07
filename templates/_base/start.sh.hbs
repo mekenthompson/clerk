@@ -2,8 +2,5 @@
 export PATH="$HOME/.bun/bin:$HOME/.nvm/versions/node/$(node -v)/bin:$PATH"
 export CLAUDE_CONFIG_DIR="{{agentDir}}/.claude"
 export TELEGRAM_STATE_DIR="{{agentDir}}/telegram"
-{{#if topicId}}export TELEGRAM_TOPIC_ID="{{topicId}}"
-{{/if}}export AGENT_NAME="{{name}}"
-export CLERK_SOCKET_PATH="${CLERK_SOCKET_PATH:-/tmp/clerk-telegram.sock}"
 cd "{{agentDir}}"
-exec claude{{#if dangerousMode}} --dangerously-skip-permissions{{/if}}
+exec claude --channels plugin:telegram@claude-plugins-official{{#if dangerousMode}} --dangerously-skip-permissions{{/if}}

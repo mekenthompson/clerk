@@ -169,4 +169,28 @@ describe("ClerkConfigSchema", () => {
     const result = ClerkConfigSchema.parse(config);
     expect(result.telegram.bot_token).toBe("vault:my-telegram-token");
   });
+
+  it("accepts per-agent bot_token", () => {
+    const config = {
+      clerk: { version: 1 },
+      telegram: {
+        bot_token: "vault:default-token",
+        forum_chat_id: "-100123",
+      },
+      agents: {
+        coach: {
+          topic_name: "Fitness",
+          bot_token: "vault:coach-bot-token",
+        },
+        assistant: {
+          topic_name: "General",
+          // No per-agent token — falls back to global
+        },
+      },
+    };
+
+    const result = ClerkConfigSchema.parse(config);
+    expect(result.agents.coach.bot_token).toBe("vault:coach-bot-token");
+    expect(result.agents.assistant.bot_token).toBeUndefined();
+  });
 });

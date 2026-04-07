@@ -50,6 +50,10 @@ export const AgentSchema = z.object({
     .string()
     .default("default")
     .describe("Template to scaffold from (e.g., 'health-coach')"),
+  bot_token: z
+    .string()
+    .optional()
+    .describe("Per-agent Telegram bot token or vault reference (overrides global telegram.bot_token)"),
   topic_name: z.string().describe("Telegram forum topic display name"),
   topic_emoji: z
     .string()

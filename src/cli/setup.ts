@@ -23,8 +23,6 @@ import {
   copyExistingCredentials,
   writeAccessJson,
   writeAgentEnv,
-  writeDaemonAccessJson,
-  writeDaemonEnv,
 } from "../setup/onboarding.js";
 import {
   ask,
@@ -71,16 +69,15 @@ export function registerSetupCommand(program: Command): void {
         // ── Step 1: Config file ──────────────────────────────────
         const config = await stepConfigFile(parentOpts.config, nonInteractive);
 
-        // ── Step 2: Bot token ────────────────────────────────────
-        const { botToken, botUsername } = await stepBotToken(
+        // ── Step 2: Bot tokens ───────────────────────────────────
+        const { botToken, botUsername, agentBots } = await stepBotToken(
           config,
           nonInteractive,
         );
 
         // ── Step 3: DM pairing ───────────────────────────────────
         const { userId } = await stepDmPairing(
-          botToken,
-          botUsername,
+          agentBots,
           nonInteractive,
           opts.userId,
         );
@@ -99,7 +96,7 @@ export function registerSetupCommand(program: Command): void {
         // ── Step 6: Scaffold agents ──────────────────────────────
         await stepScaffoldAgents(
           config,
-          botToken,
+          agentBots,
           userId,
           forumChatId,
           nonInteractive,
@@ -212,62 +209,66 @@ async function copyExampleConfig(
   return config;
 }
 
-// ─── Step 2: Bot Token ───────────────────────────────────────────────────────
+// ─── Step 2: Bot Tokens ─────────────────────────────────────────────────────
+
+interface BotTokenInfo {
+  token: string;
+  username: string;
+}
 
 async function stepBotToken(
   config: ClerkConfig,
   nonInteractive: boolean,
-): Promise<{ botToken: string; botUsername: string }> {
-  stepHeader(2, "Bot token", STEP_ACTIVE);
+): Promise<{ botToken: string; botUsername: string; agentBots: Record<string, BotTokenInfo> }> {
+  stepHeader(2, "Bot tokens", STEP_ACTIVE);
 
-  let token: string | undefined;
+  const agentNames = Object.keys(config.agents);
+  const agentBots: Record<string, BotTokenInfo> = {};
 
-  // Check env var first
-  token = process.env.TELEGRAM_BOT_TOKEN;
+  // Check if any agents have per-agent bot tokens
+  const hasPerAgentTokens = agentNames.some((name) => config.agents[name].bot_token);
 
-  // Check if config has a non-vault token
-  if (!token && !config.telegram.bot_token.startsWith("vault:")) {
-    token = config.telegram.bot_token;
-  }
+  if (hasPerAgentTokens) {
+    console.log(chalk.gray("  Per-agent bot tokens detected. Each agent gets its own bot."));
+    console.log(chalk.gray("  Tip: Create bots via @BotFather — one per agent.\n"));
 
-  // Try vault resolution
-  if (!token && config.telegram.bot_token.startsWith("vault:")) {
-    const passphrase = process.env.CLERK_VAULT_PASSPHRASE;
-    if (passphrase) {
+    for (const name of agentNames) {
+      const agentConfig = config.agents[name];
+      const rawToken = agentConfig.bot_token ?? config.telegram.bot_token;
+      const token = await resolveOrPromptToken(
+        rawToken,
+        `${name}`,
+        config,
+        nonInteractive,
+      );
+
+      const spin = spinner(`Validating ${name} bot token...`);
       try {
-        const { openVault } = await import("../vault/vault.js");
-        const vaultPath = resolvePath(
-          config.vault?.path ?? "~/.clerk/vault.enc",
-        );
-        if (existsSync(vaultPath)) {
-          const secrets = openVault(passphrase, vaultPath);
-          const key = config.telegram.bot_token.replace("vault:", "");
-          if (secrets[key]) {
-            token = secrets[key];
-          }
-        }
-      } catch {
-        // Vault not available
+        const botInfo = await validateBotToken(token);
+        spin.stop(chalk.green(`${STEP_DONE} ${name}: @${botInfo.username}`));
+        agentBots[name] = { token, username: botInfo.username };
+      } catch (err) {
+        spin.stop(chalk.red(`Failed for ${name}: ${(err as Error).message}`));
+        throw err;
       }
     }
+
+    // Use the first agent's bot as the "primary" for group/topic operations
+    const firstAgent = agentNames[0];
+    const primaryBot = agentBots[firstAgent];
+    process.env.TELEGRAM_BOT_TOKEN = primaryBot.token;
+
+    return { botToken: primaryBot.token, botUsername: primaryBot.username, agentBots };
   }
 
-  if (!token) {
-    if (nonInteractive) {
-      throw new Error(
-        "No bot token found. Set TELEGRAM_BOT_TOKEN environment variable.",
-      );
-    }
+  // Single global bot token (fallback for all agents)
+  const token = await resolveOrPromptToken(
+    config.telegram.bot_token,
+    "global",
+    config,
+    nonInteractive,
+  );
 
-    token = await ask(
-      "  Paste your Telegram bot token (from @BotFather)",
-    );
-    if (!token) {
-      throw new Error("Bot token is required");
-    }
-  }
-
-  // Validate
   const spin = spinner("Validating bot token...");
   let botInfo;
   try {
@@ -280,93 +281,159 @@ async function stepBotToken(
 
   // Store in vault if interactive
   if (!nonInteractive && config.telegram.bot_token.startsWith("vault:")) {
-    const vaultPath = resolvePath(
-      config.vault?.path ?? "~/.clerk/vault.enc",
-    );
+    await storeTokenInVault(config, token);
+  }
 
-    if (!existsSync(vaultPath)) {
-      console.log(chalk.gray("  Creating encrypted vault..."));
-      let passphrase = process.env.CLERK_VAULT_PASSPHRASE;
-      if (!passphrase) {
-        passphrase = await ask("  Vault passphrase (for encrypting secrets)");
-        if (!passphrase) {
-          throw new Error("Vault passphrase is required");
-        }
-      }
-      createVault(passphrase, vaultPath);
-      console.log(chalk.green(`  ${STEP_DONE} Vault created at ${vaultPath}`));
+  process.env.TELEGRAM_BOT_TOKEN = token;
 
-      const key = config.telegram.bot_token.replace("vault:", "");
-      setSecret(passphrase, vaultPath, key, token);
-      console.log(chalk.green(`  ${STEP_DONE} Bot token stored in vault`));
-    } else {
-      let passphrase = process.env.CLERK_VAULT_PASSPHRASE;
-      if (!passphrase) {
-        passphrase = await ask("  Vault passphrase");
-      }
-      if (passphrase) {
-        try {
-          const key = config.telegram.bot_token.replace("vault:", "");
-          setSecret(passphrase, vaultPath, key, token);
-          console.log(chalk.green(`  ${STEP_DONE} Bot token stored in vault`));
-        } catch (err) {
-          console.log(
-            chalk.yellow(
-              `  Warning: Could not store in vault: ${(err as Error).message}`,
-            ),
-          );
+  // All agents share the same bot
+  for (const name of agentNames) {
+    agentBots[name] = { token, username: botInfo.username };
+  }
+
+  return { botToken: token, botUsername: botInfo.username, agentBots };
+}
+
+async function resolveOrPromptToken(
+  rawToken: string,
+  label: string,
+  config: ClerkConfig,
+  nonInteractive: boolean,
+): Promise<string> {
+  // Check env var first
+  let token: string | undefined = process.env[`TELEGRAM_BOT_TOKEN_${label.toUpperCase().replace(/-/g, "_")}`];
+  if (!token) token = process.env.TELEGRAM_BOT_TOKEN;
+
+  // Check if config has a non-vault token
+  if (!token && !rawToken.startsWith("vault:")) {
+    token = rawToken;
+  }
+
+  // Try vault resolution
+  if (!token && rawToken.startsWith("vault:")) {
+    const passphrase = process.env.CLERK_VAULT_PASSPHRASE;
+    if (passphrase) {
+      try {
+        const { openVault } = await import("../vault/vault.js");
+        const vaultPath = resolvePath(config.vault?.path ?? "~/.clerk/vault.enc");
+        if (existsSync(vaultPath)) {
+          const secrets = openVault(passphrase, vaultPath);
+          const key = rawToken.replace("vault:", "");
+          if (secrets[key]) token = secrets[key];
         }
-      }
+      } catch { /* Vault not available */ }
     }
   }
 
-  // Set env for downstream steps
-  process.env.TELEGRAM_BOT_TOKEN = token;
+  if (!token) {
+    if (nonInteractive) {
+      throw new Error(`No bot token found for ${label}. Set TELEGRAM_BOT_TOKEN environment variable.`);
+    }
+    token = await ask(`  Paste bot token for ${label} (from @BotFather)`);
+    if (!token) throw new Error(`Bot token for ${label} is required`);
+  }
 
-  return { botToken: token, botUsername: botInfo.username };
+  return token;
+}
+
+async function storeTokenInVault(config: ClerkConfig, token: string): Promise<void> {
+  const vaultPath = resolvePath(config.vault?.path ?? "~/.clerk/vault.enc");
+
+  if (!existsSync(vaultPath)) {
+    console.log(chalk.gray("  Creating encrypted vault..."));
+    let passphrase = process.env.CLERK_VAULT_PASSPHRASE;
+    if (!passphrase) {
+      passphrase = await ask("  Vault passphrase (for encrypting secrets)");
+      if (!passphrase) throw new Error("Vault passphrase is required");
+    }
+    createVault(passphrase, vaultPath);
+    console.log(chalk.green(`  ${STEP_DONE} Vault created at ${vaultPath}`));
+
+    const key = config.telegram.bot_token.replace("vault:", "");
+    setSecret(passphrase, vaultPath, key, token);
+    console.log(chalk.green(`  ${STEP_DONE} Bot token stored in vault`));
+  } else {
+    let passphrase = process.env.CLERK_VAULT_PASSPHRASE;
+    if (!passphrase) {
+      passphrase = await ask("  Vault passphrase");
+    }
+    if (passphrase) {
+      try {
+        const key = config.telegram.bot_token.replace("vault:", "");
+        setSecret(passphrase, vaultPath, key, token);
+        console.log(chalk.green(`  ${STEP_DONE} Bot token stored in vault`));
+      } catch (err) {
+        console.log(chalk.yellow(`  Warning: Could not store in vault: ${(err as Error).message}`));
+      }
+    }
+  }
 }
 
 // ─── Step 3: DM Pairing ─────────────────────────────────────────────────────
 
 async function stepDmPairing(
-  botToken: string,
-  botUsername: string,
+  agentBots: Record<string, BotTokenInfo>,
   nonInteractive: boolean,
   userIdFlag?: string,
 ): Promise<{ userId: string; chatId: number }> {
   stepHeader(3, "DM pairing", STEP_ACTIVE);
 
+  const botEntries = Object.entries(agentBots);
+  // Deduplicate by token — if all agents share one bot, only pair once
+  const uniqueBots = new Map<string, { names: string[]; username: string; token: string }>();
+  for (const [name, info] of botEntries) {
+    const existing = uniqueBots.get(info.token);
+    if (existing) {
+      existing.names.push(name);
+    } else {
+      uniqueBots.set(info.token, { names: [name], username: info.username, token: info.token });
+    }
+  }
+
   if (nonInteractive) {
     const userId = userIdFlag ?? process.env.USER_ID;
     if (!userId) {
       console.log(
-        chalk.yellow(
-          "  Skipping DM pairing. Set USER_ID env var or --user-id flag.",
-        ),
+        chalk.yellow("  Skipping DM pairing. Set USER_ID env var or --user-id flag."),
       );
-      console.log(
-        chalk.gray(`  Action required: DM /start to t.me/${botUsername}`),
-      );
+      for (const bot of uniqueBots.values()) {
+        console.log(chalk.gray(`  Action required: DM /start to t.me/${bot.username}`));
+      }
       return { userId: "0", chatId: 0 };
     }
     console.log(chalk.green(`  ${STEP_DONE} Using user ID: ${userId}`));
     return { userId, chatId: 0 };
   }
 
-  console.log(
-    chalk.cyan(
-      `  DM /start to your bot: ${chalk.underline(`t.me/${botUsername}`)}`,
-    ),
-  );
+  // Prompt user to DM /start to each unique bot
+  for (const bot of uniqueBots.values()) {
+    const label = bot.names.length === 1 ? bot.names[0] : bot.names.join(", ");
+    console.log(
+      chalk.cyan(
+        `  DM /start to @${bot.username} (${label}): ${chalk.underline(`t.me/${bot.username}`)}`,
+      ),
+    );
+  }
 
+  // Poll the first bot for the /start message to get user ID
+  const firstBot = uniqueBots.values().next().value!;
   const spin = spinner("Waiting for /start DM (up to 2 minutes)...");
   try {
-    const result = await pollForDmStart(botToken, 120_000);
+    const result = await pollForDmStart(firstBot.token, 120_000);
     spin.stop(
       chalk.green(
         `${STEP_DONE} Paired with user: ${result.username} (ID: ${result.userId})`,
       ),
     );
+
+    if (uniqueBots.size > 1) {
+      console.log(
+        chalk.yellow(
+          `  Make sure to also DM /start to the other bots listed above.`,
+        ),
+      );
+    }
+
     return { userId: String(result.userId), chatId: result.chatId };
   } catch (err) {
     spin.stop(chalk.red(`Timed out`));
@@ -547,7 +614,7 @@ async function stepCreateTopics(
 
 async function stepScaffoldAgents(
   config: ClerkConfig,
-  botToken: string,
+  agentBots: Record<string, BotTokenInfo>,
   userId: string,
   forumChatId: string,
   nonInteractive: boolean,
@@ -571,6 +638,7 @@ async function stepScaffoldAgents(
   let scaffolded = 0;
   for (const name of agentNames) {
     const agentConfig = config.agents[name];
+    const botInfo = agentBots[name];
     try {
       const result = scaffoldAgent(
         name,
@@ -590,12 +658,11 @@ async function stepScaffoldAgents(
 
       // Write access.json with user ID
       if (userId && userId !== "0") {
-        const topicId = topicState.topics[name]?.topic_id ?? agentConfig.topic_id;
-        writeAccessJson(result.agentDir, userId, forumChatId, topicId);
+        writeAccessJson(result.agentDir, userId, forumChatId);
       }
 
-      // Write .env with bot token
-      writeAgentEnv(result.agentDir, botToken);
+      // Write .env with the agent's own bot token
+      writeAgentEnv(result.agentDir, botInfo.token);
 
       const detail =
         result.created.length > 0
@@ -603,7 +670,7 @@ async function stepScaffoldAgents(
           : "up to date";
       console.log(
         `  ${chalk.green("+")} ${chalk.bold(name)}` +
-          chalk.gray(` (${agentConfig.template}) - ${detail}`),
+          chalk.gray(` (${agentConfig.template}) @${botInfo.username} - ${detail}`),
       );
       scaffolded++;
     } catch (err) {
@@ -611,13 +678,6 @@ async function stepScaffoldAgents(
         chalk.red(`  x ${name}: ${(err as Error).message}`),
       );
     }
-  }
-
-  // Write daemon config files
-  if (userId && userId !== "0") {
-    writeDaemonAccessJson(userId, forumChatId);
-    writeDaemonEnv(botToken);
-    console.log(chalk.gray("  Daemon config written to ~/.clerk/"));
   }
 
   // Install systemd units

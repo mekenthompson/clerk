@@ -43,8 +43,8 @@ export function copyOnboardingState(
 
 /**
  * Build an access.json for an agent's telegram directory.
- * Includes the forum_chat_id, optional topic_id, allowed user IDs,
- * and DM chat allowFrom.
+ * Uses the official Telegram plugin format with dmPolicy, allowFrom,
+ * and groups sections.
  */
 export function buildAccessJson(
   userId: string,
@@ -52,17 +52,15 @@ export function buildAccessJson(
   topicId?: number,
 ): string {
   const access: Record<string, unknown> = {
-    forum_chat_id: forumChatId,
-    allowed_users: [parseInt(userId, 10)],
-    allowFrom: [
-      parseInt(forumChatId, 10),
-      parseInt(userId, 10),
-    ],
+    dmPolicy: "allowlist",
+    allowFrom: [userId],
+    groups: {
+      [forumChatId]: {
+        requireMention: false,
+        allowFrom: [],
+      },
+    },
   };
-
-  if (topicId !== undefined) {
-    access.topic_id = topicId;
-  }
 
   return JSON.stringify(access, null, 2) + "\n";
 }

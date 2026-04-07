@@ -25,7 +25,7 @@ A config-driven CLI that:
 2. Scaffolds agent directories from templates (SOUL.md, CLAUDE.md, settings, skills)
 3. Manages OAuth login per agent via `clerk auth login <agent>`
 4. Generates systemd + tmux units for headless operation with interactive access
-5. Provides a forked Telegram plugin with topic routing (message_thread_id)
+5. Assigns one Telegram bot per agent, each using the official `plugin:telegram@claude-plugins-official`
 6. Integrates Hindsight for per-agent semantic memory with knowledge graphs
 7. Manages secrets via an encrypted vault
 8. Offers a lightweight web dashboard for monitoring
@@ -41,31 +41,37 @@ A config-driven CLI that:
 
 ## Architecture
 
+One bot per agent. Each agent uses the official Telegram plugin.
+
 ```
 ┌──────────────────────────────────────┐
 │        Telegram Forum Group           │
 │  ┌─────────┬───────────┬───────────┐ │
-│  │ Health  │ Executive │  General  │ │
+│  │ Fitness │ Executive │  General  │ │
 │  │ Topic   │  Topic    │  Topic    │ │
 │  └────┬────┴─────┬─────┴─────┬─────┘ │
 └───────┼──────────┼───────────┼───────┘
         │          │           │
-   topic_id=2  topic_id=5  topic_id=8
+     @CoachBot  @ExecBot   @AssistBot
         │          │           │
         ▼          ▼           ▼
 ┌────────────┐┌────────────┐┌────────────┐
 │  tmux:     ││  tmux:     ││  tmux:     │
 │  clerk-    ││  clerk-    ││  clerk-    │
-│  health    ││  exec      ││  general   │
+│  coach     ││  exec      ││  general   │
 │            ││            ││            │
 │ claude     ││ claude     ││ claude     │
 │ --channels ││ --channels ││ --channels │
+│ plugin:tg  ││ plugin:tg  ││ plugin:tg  │
 │            ││            ││            │
 │ SOUL.md    ││ SOUL.md    ││ SOUL.md    │
 │ CLAUDE.md  ││ CLAUDE.md  ││ CLAUDE.md  │
 │ memory/    ││ memory/    ││ memory/    │
 │ skills/    ││ skills/    ││ skills/    │
 │ .claude/   ││ .claude/   ││ .claude/   │
+│ telegram/  ││ telegram/  ││ telegram/  │
+│  .env      ││  .env      ││  .env      │
+│  access.json  access.json  access.json │
 └────────────┘└────────────┘└────────────┘
   systemd       systemd       systemd
 ```
@@ -106,13 +112,12 @@ Hindsight provides 4-strategy retrieval (semantic + BM25 + entity graph + tempor
 
 ### Telegram Model
 
-A forked version of the official `claude-plugins-official` Telegram plugin, adding:
-- `message_thread_id` in inbound metadata
-- `message_thread_id` parameter in reply/edit tools
-- `TELEGRAM_TOPIC_ID` env var for filtering (agent only responds to its assigned topic)
-- Topic-aware file sending (sendPhoto/sendDocument with thread_id)
-
-All agents share one Telegram bot token but filter to their own topic.
+Each agent gets its own Telegram bot and uses the official `plugin:telegram@claude-plugins-official`:
+- One bot per agent, each with its own `TELEGRAM_BOT_TOKEN` in `telegram/.env`
+- Privacy mode disabled on each bot so it sees all group messages
+- All bots added to the same forum group as admins
+- `access.json` controls which groups the bot responds in (`requireMention: false`)
+- No daemon, no routing — each bot is an independent Telegram poller
 
 ### Persona Model
 
@@ -147,27 +152,29 @@ vault:
   path: ~/.clerk/vault.enc
 
 agents:
-  health-coach:
+  coach:
+    bot_token: "vault:coach-bot-token"     # Per-agent bot token
     template: health-coach
-    topic_name: "Health"
+    topic_name: "Fitness"
     topic_emoji: "🏋️"
     soul:
       name: Coach
       style: motivational, direct, accountability-focused
-      boundaries: not a doctor, always recommend professional care
+      boundaries: not a licensed professional, always recommend consulting a qualified expert
     tools:
       allow: [calendar, notion, web-search, hindsight]
       deny: [bash, edit, write]
     memory:
-      collection: health
+      collection: fitness
       auto_recall: true
     schedule:
       - cron: "0 8 * * *"
         prompt: "Morning check-in: ask about sleep and plans for today"
       - cron: "0 20 * * 0"
-        prompt: "Weekly review: summarize this week's health activity"
+        prompt: "Weekly review: summarize this week's activity"
 
   exec-assistant:
+    bot_token: "vault:exec-bot-token"
     template: executive-assistant
     topic_name: "Executive"
     topic_emoji: "📋"
@@ -183,6 +190,7 @@ agents:
       auto_recall: true
 
   assistant:
+    bot_token: "vault:assistant-bot-token"
     template: default
     topic_name: "General"
     topic_emoji: "💬"

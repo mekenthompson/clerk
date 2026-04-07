@@ -117,8 +117,9 @@ export function scaffoldAgent(
     } catch { /* no state file yet */ }
   }
 
-  // Resolve bot token from vault or env
-  const resolvedBotToken = resolveBotToken(telegramConfig.bot_token);
+  // Resolve bot token: per-agent token takes priority, then global telegram token
+  const rawBotToken = agentConfig.bot_token ?? telegramConfig.bot_token;
+  const resolvedBotToken = resolveBotToken(rawBotToken);
 
   // Build the template rendering context
   const context: Record<string, unknown> = {
@@ -133,7 +134,7 @@ export function scaffoldAgent(
     model: agentConfig.model,
     mcpServers: agentConfig.mcp_servers,
     schedule: agentConfig.schedule,
-    botToken: resolvedBotToken ?? telegramConfig.bot_token,
+    botToken: resolvedBotToken ?? rawBotToken,
     forumChatId: telegramConfig.forum_chat_id,
     dangerousMode: agentConfig.dangerous_mode === true,
     skipPermissionPrompt: agentConfig.skip_permission_prompt === true,
@@ -265,9 +266,6 @@ export function scaffoldAgent(
   // --- Set up plugin symlinks ---
   setupPlugins(agentDir);
 
-  // --- Set up clerk-channel MCP server in settings.json ---
-  setupClerkChannel(agentDir, name, topicId);
-
   return { agentDir, created, skipped };
 }
 
@@ -290,52 +288,20 @@ function writeIfMissing(
   created.push(filePath);
 }
 
-/**
- * Set up the clerk-channel MCP server in the agent's settings.json.
- * This allows the agent to communicate via the shared daemon instead of
- * running its own Telegram poller.
- */
-function setupClerkChannel(agentDir: string, agentName: string, topicId?: number): void {
-  const settingsPath = join(agentDir, ".claude", "settings.json");
-  if (!existsSync(settingsPath)) return;
-
-  try {
-    const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-    if (!settings.mcpServers) {
-      settings.mcpServers = {};
-    }
-
-    // Add clerk-channel MCP server pointing to the channel plugin
-    const channelServerPath = resolve(import.meta.dirname, "../../clerk-channel/server.ts");
-    if (!settings.mcpServers["clerk-telegram"]) {
-      settings.mcpServers["clerk-telegram"] = {
-        command: "bun",
-        args: [channelServerPath],
-        env: {
-          TELEGRAM_TOPIC_ID: String(topicId ?? ""),
-          AGENT_NAME: agentName,
-          CLERK_SOCKET_PATH: process.env.CLERK_SOCKET_PATH ?? "/tmp/clerk-telegram.sock",
-          TELEGRAM_FORUM_CHAT_ID: process.env.TELEGRAM_FORUM_CHAT_ID ?? "",
-        },
-      };
-    }
-
-    writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n", "utf-8");
-  } catch {
-    // Non-fatal — settings.json may not be valid JSON yet
-  }
-}
-
 function buildAccessJson(
   agentConfig: AgentConfig,
   telegramConfig: TelegramConfig,
   resolvedTopicId?: number,
 ): string {
   const access: Record<string, unknown> = {
-    forum_chat_id: telegramConfig.forum_chat_id,
+    dmPolicy: "allowlist",
+    allowFrom: [],
+    groups: {
+      [telegramConfig.forum_chat_id]: {
+        requireMention: false,
+        allowFrom: [],
+      },
+    },
   };
-  if (resolvedTopicId !== undefined) {
-    access.topic_id = resolvedTopicId;
-  }
   return JSON.stringify(access, null, 2) + "\n";
 }

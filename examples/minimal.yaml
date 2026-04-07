@@ -1,4 +1,5 @@
 # clerk.yaml — Minimal single-agent setup
+# One bot, one agent, one topic.
 
 clerk:
   version: 1

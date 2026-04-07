@@ -1,5 +1,6 @@
 # clerk.yaml — Full example configuration
-# See PRD.md for detailed documentation
+# Each agent gets its own Telegram bot (one bot per agent).
+# Create bots via @BotFather: /newbot for each agent.
 
 clerk:
   version: 1
@@ -20,27 +21,29 @@ vault:
   path: ~/.clerk/vault.enc
 
 agents:
-  health-coach:
+  coach:
+    bot_token: "vault:coach-bot-token"
     template: health-coach
-    topic_name: "Health"
+    topic_name: "Fitness"
     topic_emoji: "🏋️"
     soul:
       name: Coach
       style: motivational, direct, accountability-focused
-      boundaries: not a doctor, always recommend professional care for medical concerns
+      boundaries: not a licensed professional, always recommend consulting a qualified expert
     tools:
       allow: [calendar, notion, web-search, hindsight]
       deny: [bash, edit, write]
     memory:
-      collection: health
+      collection: fitness
       auto_recall: true
     schedule:
       - cron: "0 8 * * *"
         prompt: "Good morning check-in: ask about sleep, energy, and plans for today"
       - cron: "0 20 * * 0"
-        prompt: "Weekly health review: summarize this week's activity, meals, and mood"
+        prompt: "Weekly review: summarize this week's activity and progress"
 
   exec-assistant:
+    bot_token: "vault:exec-bot-token"
     template: executive-assistant
     topic_name: "Executive"
     topic_emoji: "📋"
@@ -59,6 +62,7 @@ agents:
         prompt: "Daily briefing: summarize today's calendar, pending tasks, and priorities"
 
   coding:
+    bot_token: "vault:coding-bot-token"
     template: coding
     topic_name: "Code"
     topic_emoji: "💻"
@@ -72,6 +76,7 @@ agents:
       auto_recall: true
 
   assistant:
+    bot_token: "vault:assistant-bot-token"
     template: default
     topic_name: "General"
     topic_emoji: "💬"

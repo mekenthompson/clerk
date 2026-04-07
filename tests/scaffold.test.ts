@@ -72,19 +72,11 @@ describe("scaffoldAgent", () => {
     expect(startSh).toContain("#!/bin/bash");
     expect(startSh).toContain(`CLAUDE_CONFIG_DIR="${result.agentDir}/.claude"`);
     expect(startSh).toContain(`TELEGRAM_STATE_DIR="${result.agentDir}/telegram"`);
-    expect(startSh).toContain('TELEGRAM_TOPIC_ID="42"');
-    expect(startSh).toContain("exec claude");
-    expect(startSh).toContain('AGENT_NAME="my-agent"');
-    expect(startSh).toContain("CLERK_SOCKET_PATH");
-    expect(startSh).not.toContain("--dangerously-skip-permissions");
-  });
-
-  it("omits TELEGRAM_TOPIC_ID when topic_id is not set", () => {
-    const config = makeAgentConfig();
-    const result = scaffoldAgent("no-topic", config, tmpDir, telegramConfig);
-    const startSh = readFileSync(join(result.agentDir, "start.sh"), "utf-8");
-
+    expect(startSh).toContain("exec claude --channels plugin:telegram@claude-plugins-official");
     expect(startSh).not.toContain("TELEGRAM_TOPIC_ID");
+    expect(startSh).not.toContain("AGENT_NAME");
+    expect(startSh).not.toContain("CLERK_SOCKET_PATH");
+    expect(startSh).not.toContain("--dangerously-skip-permissions");
   });
 
   it("generates telegram .env with bot token", () => {
@@ -95,15 +87,18 @@ describe("scaffoldAgent", () => {
     expect(envContent).toContain("TELEGRAM_BOT_TOKEN=123456:ABC-DEF");
   });
 
-  it("generates access.json with topic filtering", () => {
+  it("generates access.json with group config", () => {
     const config = makeAgentConfig({ topic_id: 99 });
     const result = scaffoldAgent("filtered", config, tmpDir, telegramConfig);
     const access = JSON.parse(
       readFileSync(join(result.agentDir, "telegram", "access.json"), "utf-8"),
     );
 
-    expect(access.forum_chat_id).toBe("-1001234567890");
-    expect(access.topic_id).toBe(99);
+    expect(access.dmPolicy).toBe("allowlist");
+    expect(access.allowFrom).toEqual([]);
+    expect(access.groups).toBeDefined();
+    expect(access.groups["-1001234567890"]).toBeDefined();
+    expect(access.groups["-1001234567890"].requireMention).toBe(false);
   });
 
   it("generates settings.json with tool permissions", () => {
@@ -179,16 +174,16 @@ describe("scaffoldAgent", () => {
     expect(settings.skipDangerousModePermissionPrompt).toBeUndefined();
   });
 
-  it("includes clerk-telegram MCP server in settings.json", () => {
+  it("does not include clerk-telegram MCP server in settings.json", () => {
     const config = makeAgentConfig();
     const result = scaffoldAgent("plugin-agent", config, tmpDir, telegramConfig);
     const settings = JSON.parse(
       readFileSync(join(result.agentDir, ".claude", "settings.json"), "utf-8"),
     );
 
-    expect(settings.mcpServers).toBeDefined();
-    expect(settings.mcpServers["clerk-telegram"]).toBeDefined();
-    expect(settings.mcpServers["clerk-telegram"].command).toBe("bun");
+    // The clerk-telegram daemon MCP server should NOT be present
+    // Each agent uses the official plugin:telegram@claude-plugins-official instead
+    expect(settings.mcpServers?.["clerk-telegram"]).toBeUndefined();
   });
 
   it("writes comment in .env when bot token is unresolvable vault reference", () => {
@@ -212,6 +207,22 @@ describe("scaffoldAgent", () => {
       if (origPassphrase !== undefined) process.env.CLERK_VAULT_PASSPHRASE = origPassphrase;
       if (origToken !== undefined) process.env.TELEGRAM_BOT_TOKEN = origToken;
     }
+  });
+
+  it("uses per-agent bot token when provided", () => {
+    const config = makeAgentConfig({ bot_token: "999888:AGENT-SPECIFIC" });
+    const result = scaffoldAgent("agent-token", config, tmpDir, telegramConfig);
+    const envContent = readFileSync(join(result.agentDir, "telegram", ".env"), "utf-8");
+
+    expect(envContent).toContain("TELEGRAM_BOT_TOKEN=999888:AGENT-SPECIFIC");
+  });
+
+  it("falls back to global bot token when no per-agent token", () => {
+    const config = makeAgentConfig();
+    const result = scaffoldAgent("global-token", config, tmpDir, telegramConfig);
+    const envContent = readFileSync(join(result.agentDir, "telegram", ".env"), "utf-8");
+
+    expect(envContent).toContain("TELEGRAM_BOT_TOKEN=123456:ABC-DEF");
   });
 
   it("creates plugin directories during scaffolding", () => {

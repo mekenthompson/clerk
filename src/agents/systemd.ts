@@ -53,9 +53,6 @@ export function uninstallUnit(name: string): void {
 export function installAllUnits(config: ClerkConfig): void {
   const agentsDir = resolveAgentsDir(config);
 
-  // Install the shared telegram daemon unit
-  installDaemonUnit();
-
   for (const agentName of Object.keys(config.agents)) {
     const agentDir = resolve(agentsDir, agentName);
     const content = generateUnit(agentName, agentDir);

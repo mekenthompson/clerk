@@ -9,7 +9,7 @@ Clerk manages multiple long-running Claude Code sessions, each with its own pers
 - **Scaffolds agent directories** from templates (persona, behavior, skills, memory)
 - **Manages authentication** per agent via official Claude Code OAuth
 - **Generates systemd + tmux units** for headless operation with interactive access
-- **Routes Telegram topics** to the right agent (forked official plugin with topic support)
+- **One bot per agent**: each agent runs the official Telegram plugin with its own bot token
 - **Integrates Hindsight** for per-agent semantic memory with knowledge graphs
 - **Encrypts secrets** via AES-256-GCM vault
 - **Provides a CLI and web dashboard** for lifecycle management
@@ -23,11 +23,37 @@ Clerk is **not a harness or wrapper**. It never intercepts Claude's authenticati
 Clerk is designed to work within Anthropic's published guidelines:
 
 - **Not a third-party harness**: Clerk never routes subscription credentials or inference requests. Each agent runs the unmodified `claude` CLI binary and authenticates directly with Anthropic via Claude Code's own OAuth flow.
-- **Uses official channels API**: Clerk's channel plugin uses the [documented MCP channels protocol](https://code.claude.com/docs/en/channels-reference) — the same `claude/channel` capability, `notifications/claude/channel` events, and stdio transport that Anthropic's own Telegram and Discord plugins use.
-- **Building custom channels is explicitly supported**: Anthropic's channels reference states "You can also build your own channel for systems that don't have a plugin yet" and provides detailed implementation guidance.
+- **Uses the official Telegram plugin**: Each agent uses `claude --channels plugin:telegram@claude-plugins-official` — Anthropic's own approved marketplace plugin. No custom channel, no daemon.
 - **No credential interception**: Authentication is handled entirely by Claude Code. Clerk never touches access tokens, refresh tokens, or OAuth flows.
 
 For full compliance analysis with citations and evidence, see [docs/compliance-attestation.md](docs/compliance-attestation.md).
+
+## Architecture: One Bot Per Agent
+
+Each agent gets its own Telegram bot. This is the simplest, most reliable architecture:
+
+```
+Telegram Forum Group
+┌──────────┬────────────┬────────────┐
+│ Fitness  │ Executive  │  General   │
+│ Topic    │  Topic     │  Topic     │
+└────┬─────┴──────┬─────┴──────┬─────┘
+     │            │            │
+     ▼            ▼            ▼
+  @CoachBot    @ExecBot    @AssistBot
+     │            │            │
+  claude        claude       claude
+  --channels    --channels   --channels
+  plugin:tg     plugin:tg    plugin:tg
+  systemd       systemd      systemd
+  + tmux        + tmux       + tmux
+```
+
+Why one bot per agent:
+- **No routing complexity**: each bot only sees messages in the group (privacy mode off)
+- **Uses the official plugin**: `plugin:telegram@claude-plugins-official` — approved, no prompts
+- **Independent lifecycle**: start, stop, restart agents independently
+- **Simple .env**: each agent's `telegram/.env` has its own `TELEGRAM_BOT_TOKEN`
 
 ## Quick Start
 
@@ -39,8 +65,34 @@ For full compliance analysis with citations and evidence, see [docs/compliance-a
 - [Claude Code CLI](https://code.claude.com) (`npm install -g @anthropic-ai/claude-code`)
 - Claude Pro or Max subscription
 - [tmux](https://github.com/tmux/tmux) (`sudo apt install tmux`)
-- A Telegram bot token ([create one with @BotFather](https://t.me/BotFather))
+- One Telegram bot per agent ([create via @BotFather](https://t.me/BotFather))
 - A Telegram group with forum/topics enabled
+
+### Create Bots via @BotFather
+
+For each agent, create a bot:
+
+```
+/newbot
+Name: Clerk Coach
+Username: clerk_coach_bot
+
+/newbot
+Name: Clerk Exec
+Username: clerk_exec_bot
+
+/newbot
+Name: Clerk Assistant
+Username: clerk_assistant_bot
+```
+
+For each bot, disable privacy mode so it can see all messages in the group:
+
+```
+/mybots -> select bot -> Bot Settings -> Group Privacy -> Turn off
+```
+
+Add all bots to your Telegram forum group as admins.
 
 ### Install and Setup
 
@@ -49,7 +101,7 @@ npm install -g clerk-ai
 clerk setup
 ```
 
-That's it. The interactive wizard walks you through everything: config file, bot token, DM pairing, group detection, topic creation, agent scaffolding, and onboarding.
+The interactive wizard walks you through: config file, bot tokens (one per agent), DM pairing, group detection, topic creation, agent scaffolding, and onboarding.
 
 For non-interactive / CI usage:
 
@@ -67,13 +119,11 @@ If you prefer to set up each step manually:
 clerk init --example clerk
 ```
 
-This copies an example `clerk.yaml` into your current directory with four agents: health-coach, exec-assistant, coding, and general assistant. Edit it to match your setup:
+This copies an example `clerk.yaml` into your current directory. Edit it to set your bot tokens and forum_chat_id:
 
 ```bash
 $EDITOR clerk.yaml
 ```
-
-At minimum, set your Telegram `forum_chat_id` (the group where topics will be created).
 
 #### 2. Set up secrets
 
@@ -81,104 +131,43 @@ At minimum, set your Telegram `forum_chat_id` (the group where topics will be cr
 # Create an encrypted vault for sensitive values
 clerk vault init
 
-# Store your Telegram bot token
-clerk vault set telegram-bot-token
+# Store bot tokens
+clerk vault set coach-bot-token
+clerk vault set exec-bot-token
+clerk vault set assistant-bot-token
 ```
-
-The vault uses AES-256-GCM encryption. You'll be prompted for a passphrase.
 
 #### 3. Create Telegram forum topics
 
 ```bash
-# Make sure your bot is an admin in the forum group, then:
-export TELEGRAM_BOT_TOKEN=your-bot-token-here
+export TELEGRAM_BOT_TOKEN=your-first-bot-token
 clerk topics sync
 ```
-
-This creates a forum topic for each agent and saves the mapping.
 
 #### 4. Initialize and start
 
 ```bash
-# Scaffold all agent directories and install systemd units
 clerk init
-
-# Start the first agent
-clerk agent start health-coach
+clerk agent start coach
 ```
 
 #### 5. Complete Claude Code onboarding (once per agent)
 
 ```bash
-# Attach to the agent's tmux session
-clerk agent attach health-coach
-
-# Complete Claude Code's onboarding:
-#   - Select theme
-#   - Log in (browser OAuth)
-#   - Trust the project
-
-# Detach from tmux: Ctrl+B, then D
+clerk agent attach coach
+# Select theme, log in (browser OAuth), trust the project
+# Detach: Ctrl+B, then D
 ```
 
-The agent is now running and authenticated. Claude Code manages its own OAuth tokens automatically. Repeat for each agent:
-
-```bash
-clerk agent start exec-assistant
-clerk agent attach exec-assistant
-# Complete onboarding, then Ctrl+B, D
-
-clerk agent start assistant
-clerk agent attach assistant
-# Complete onboarding, then Ctrl+B, D
-```
-
-Check status:
-```bash
-clerk agent list
-clerk auth status
-```
-
-That's it. Your agents are running headless, each responding in their own Telegram topic.
+Repeat for each agent.
 
 ### Interacting with agents
 
-- **Send a message** in a Telegram forum topic — the assigned agent responds
-- **Use bot commands** in Telegram for instant management (no Claude tokens):
-  - `/agents` — check all agent statuses
-  - `/clerkstart health-coach` — start an agent
-  - `/stop health-coach` — stop an agent
-  - `/restart all` — restart all agents
-  - `/logs health-coach` — view recent logs
-  - `/clerkhelp` — list all bot commands
-- **Attach to a session**: `clerk agent attach health-coach` (tmux, Ctrl+B D to detach)
-- **View logs**: `clerk agent logs health-coach -f`
+- **Send a message** in a Telegram forum topic — the assigned bot/agent responds
+- **Attach to a session**: `clerk agent attach coach` (tmux, Ctrl+B D to detach)
+- **View logs**: `clerk agent logs coach -f`
 - **Web dashboard**: `clerk web` then open http://localhost:8080
 - **Check auth**: `clerk auth status`
-
-## How It Works
-
-```
-Telegram Forum Group
-┌─────────┬───────────┬───────────┐
-│ Health  │ Executive │  General  │
-│ Topic   │  Topic    │  Topic    │
-└────┬────┴─────┬─────┴─────┬─────┘
-     │          │           │
-     ▼          ▼           ▼
-  claude      claude      claude
-  --channels  --channels  --channels
-  (health)    (exec)      (general)
-  systemd     systemd     systemd
-  + tmux      + tmux      + tmux
-```
-
-Each agent runs as:
-- A **systemd user unit** (boot persistence, auto-restart on crash)
-- Inside a **tmux session** (headless by default, `clerk agent attach` for interactive access)
-- With its own **CLAUDE_CONFIG_DIR** (isolated OAuth tokens, independent 8-hour refresh cycle)
-- With its own **Telegram topic** (messages routed by `message_thread_id`)
-- With its own **persona** (SOUL.md), **behavior** (CLAUDE.md), **memory**, and **skills**
 
 ## Configuration
 
@@ -190,42 +179,35 @@ clerk:
   version: 1
 
 telegram:
-  bot_token: "vault:telegram-bot-token"
+  bot_token: "vault:telegram-bot-token"   # Default fallback
   forum_chat_id: "-1001234567890"
 
-memory:
-  backend: hindsight
-  config:
-    provider: ollama
-
 agents:
-  health-coach:
+  coach:
+    bot_token: "vault:coach-bot-token"     # Per-agent bot token
     template: health-coach
-    topic_name: "Health"
+    topic_name: "Fitness"
     topic_emoji: "🏋️"
     soul:
       name: Coach
       style: motivational, direct
     tools:
-      allow: [calendar, notion, hindsight]
+      allow: [calendar, notion, web-search, hindsight]
       deny: [bash, edit, write]
     memory:
-      collection: health
-    schedule:
-      - cron: "0 8 * * *"
-        prompt: "Morning check-in"
+      collection: fitness
 
   exec-assistant:
+    bot_token: "vault:exec-bot-token"
     template: executive-assistant
     topic_name: "Executive"
     topic_emoji: "📋"
     tools:
       allow: [calendar, notion, web-search, hindsight]
       deny: [bash, edit, write]
-    memory:
-      collection: executive
 
   assistant:
+    bot_token: "vault:assistant-bot-token"
     template: default
     topic_name: "General"
     topic_emoji: "💬"
@@ -233,7 +215,9 @@ agents:
       allow: [all]
 ```
 
-Add a new agent: add a few lines to `clerk.yaml`, run `clerk agent create <name>`, authenticate, start.
+If `bot_token` is omitted from an agent, it falls back to the global `telegram.bot_token`.
+
+Add a new agent: add a few lines to `clerk.yaml`, create a bot via @BotFather, run `clerk agent create <name>`, authenticate, start.
 
 ## CLI Reference
 
@@ -282,22 +266,7 @@ All commands support `--config <path>` to specify a custom clerk.yaml location. 
 
 ## Agent Personas
 
-Each agent has a **SOUL.md** that defines its personality:
-
-```markdown
-# Coach
-
-## Communication Style
-Motivational but not cheesy. Direct and honest.
-
-## Principles
-- Accountability first
-- Progress over perfection
-- Keep it simple
-- Know your limits — not a doctor, recommend professional care
-```
-
-And a **CLAUDE.md** that defines its behavior, available tools, and interaction patterns.
+Each agent has a **SOUL.md** that defines its personality and a **CLAUDE.md** that defines its behavior, available tools, and interaction patterns.
 
 ## Templates
 
@@ -331,26 +300,6 @@ Set `isolation: strict` on any agent to prevent its memories from being included
 - **Path traversal protection**: Template and config paths are contained
 - **Web dashboard**: Binds to localhost only, optional bearer token auth via `CLERK_WEB_TOKEN`
 - **No credential interception**: Each agent authenticates directly with Claude Code OAuth
-
-## Telegram Bot Commands
-
-The Telegram bot handles management commands directly — zero Claude tokens, instant response:
-
-| Command | Description |
-|---------|-------------|
-| `/agents` | Show all agent statuses |
-| `/clerkstart <name>` | Start an agent |
-| `/stop <name>` | Stop an agent |
-| `/restart <name\|all>` | Restart agent(s) |
-| `/auth` | Check OAuth token health |
-| `/topics` | Show topic-to-agent mapping |
-| `/logs <name> [lines]` | View recent log lines |
-| `/memory <query>` | Search Hindsight memories |
-| `/clerkhelp` | List all commands |
-
-These run on the server via the clerk CLI — no inference needed. Regular messages (not starting with /) go to Claude as normal.
-
-Configure with `CLERK_CLI_PATH` and `CLERK_CONFIG` env vars if clerk is not on the default PATH.
 
 ## Clerk MCP Server
 
