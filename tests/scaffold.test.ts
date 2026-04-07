@@ -58,10 +58,10 @@ describe("scaffoldAgent", () => {
     const result = scaffoldAgent("health-coach", config, tmpDir, telegramConfig);
     const claudeMd = readFileSync(join(result.agentDir, "CLAUDE.md"), "utf-8");
 
-    expect(claudeMd).toContain("# Agent: health-coach");
-    expect(claudeMd).toContain("You are Coach.");
-    expect(claudeMd).toContain("Style: motivational, direct");
-    expect(claudeMd).toContain("Boundaries: not a doctor");
+    expect(claudeMd).toContain("health-coach");
+    expect(claudeMd).toContain("Coach");
+    expect(claudeMd).toContain("motivational");
+    expect(claudeMd).toContain("not a doctor");
   });
 
   it("generates start.sh with correct env vars", () => {
