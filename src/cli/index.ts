@@ -8,6 +8,7 @@ import { registerTopicsCommand } from "./topics.js";
 import { registerAuthCommand } from "./auth.js";
 import { registerVaultCommand } from "./vault.js";
 import { registerMemoryCommand } from "./memory.js";
+import { registerWebCommand } from "./web.js";
 
 const pkg = JSON.parse(
   readFileSync(resolve(import.meta.dirname, "../../package.json"), "utf-8")
@@ -28,3 +29,4 @@ registerTopicsCommand(program);
 registerAuthCommand(program);
 registerVaultCommand(program);
 registerMemoryCommand(program);
+registerWebCommand(program);
