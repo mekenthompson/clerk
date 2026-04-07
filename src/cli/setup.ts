@@ -23,6 +23,10 @@ import {
   copyExistingCredentials,
   writeAccessJson,
   writeAgentEnv,
+  saveUserConfig,
+  loadUserConfig,
+  preTrustWorkspace,
+  createMinimalClaudeConfig,
 } from "../setup/onboarding.js";
 import {
   ask,
@@ -81,6 +85,11 @@ export function registerSetupCommand(program: Command): void {
           nonInteractive,
           opts.userId,
         );
+
+        // Persist user config for later scaffold runs
+        if (userId && userId !== "0") {
+          saveUserConfig(userId);
+        }
 
         // ── Step 4: Group setup ──────────────────────────────────
         const forumChatId = await stepGroupSetup(
@@ -630,6 +639,14 @@ async function stepScaffoldAgents(
     console.log(
       chalk.gray(`  Found existing Claude config: ${existingClaudeJson}`),
     );
+  } else if (!nonInteractive) {
+    console.log(
+      chalk.yellow(
+        "  Claude Code has not been set up on this machine yet.\n" +
+        "  Run `claude` in a terminal first to complete initial setup, then run `clerk setup` again.\n" +
+        "  Continuing with minimal config — agents will need onboarding via `clerk agent attach <name>`."
+      ),
+    );
   }
 
   // Load topic state for topic IDs
@@ -640,23 +657,17 @@ async function stepScaffoldAgents(
     const agentConfig = config.agents[name];
     const botInfo = agentBots[name];
     try {
+      // scaffoldAgent now handles user ID loading, Claude config copy, and pre-trust internally
       const result = scaffoldAgent(
         name,
         agentConfig,
         agentsDir,
         config.telegram,
         config,
+        userId !== "0" ? userId : undefined,
       );
 
-      // Copy onboarding state if available
-      if (existingClaudeJson) {
-        copyOnboardingState(existingClaudeJson, result.agentDir);
-      }
-
-      // Copy credentials if available
-      copyExistingCredentials(result.agentDir);
-
-      // Write access.json with user ID
+      // Write access.json with user ID (overwrite with latest from setup)
       if (userId && userId !== "0") {
         writeAccessJson(result.agentDir, userId, forumChatId);
       }

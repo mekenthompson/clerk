@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import chalk from "chalk";
-import { syncTopics, listTopics, resolveBotToken, TopicSyncError } from "../telegram/topic-manager.js";
+import { syncTopics, listTopics, resolveBotToken, TopicSyncError, findOrphanedTopics, cleanupOrphanedTopics } from "../telegram/topic-manager.js";
 import { withConfigError, getConfig } from "./helpers.js";
 
 function withTopicError(fn: (...args: any[]) => Promise<void>) {
@@ -124,6 +124,44 @@ export function registerTopicsCommand(program: Command): void {
         ]);
 
         printTable(headers, rows, widths);
+        console.log();
+      })
+    );
+
+  // clerk topics cleanup
+  topics
+    .command("cleanup")
+    .description("Close orphaned topics (in state but not in current config)")
+    .action(
+      withTopicError(async () => {
+        const config = getConfig(program);
+
+        const orphans = findOrphanedTopics(config);
+        if (orphans.length === 0) {
+          console.log(chalk.green("\n  No orphaned topics found.\n"));
+          return;
+        }
+
+        console.log(chalk.bold(`\nCleaning up ${orphans.length} orphaned topic(s)...\n`));
+
+        const results = await cleanupOrphanedTopics(config);
+
+        const headers = ["Agent", "Topic ID", "Status"];
+        const widths = [20, 14, 10];
+
+        const rows = results.map((r) => [
+          r.agent,
+          String(r.topic_id),
+          r.closed ? chalk.green("closed") : chalk.yellow("failed"),
+        ]);
+
+        printTable(headers, rows, widths);
+
+        const closed = results.filter((r) => r.closed).length;
+        console.log();
+        console.log(
+          chalk.gray(`  ${closed}/${results.length} orphaned topics closed and removed from state`)
+        );
         console.log();
       })
     );

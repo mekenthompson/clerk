@@ -10,6 +10,14 @@ import {
 import { getHindsightSettingsEntry, getClerkMcpSettingsEntry } from "../memory/scaffold-integration.js";
 import { loadTopicState } from "../telegram/state.js";
 import { isVaultReference, parseVaultReference } from "../vault/resolver.js";
+import {
+  findExistingClaudeJson,
+  copyOnboardingState,
+  copyExistingCredentials,
+  preTrustWorkspace,
+  createMinimalClaudeConfig,
+  loadUserConfig,
+} from "../setup/onboarding.js";
 
 export interface ScaffoldResult {
   agentDir: string;
@@ -100,6 +108,7 @@ export function scaffoldAgent(
   agentsDir: string,
   telegramConfig: TelegramConfig,
   clerkConfig?: ClerkConfig,
+  userIdOverride?: string,
 ): ScaffoldResult {
   const agentDir = resolve(agentsDir, name);
   const created: string[] = [];
@@ -107,6 +116,10 @@ export function scaffoldAgent(
 
   const templatePath = getTemplatePath(agentConfig.template);
   const basePath = getBaseTemplatePath();
+
+  // Load user config for Telegram user ID
+  const userConfig = loadUserConfig();
+  const userId = userIdOverride ?? userConfig?.userId;
 
   // Resolve topic ID: config takes priority, then topics.json state file
   let topicId = agentConfig.topic_id;
@@ -216,18 +229,33 @@ export function scaffoldAgent(
   }
 
   // --- Claude Code config (onboarding state) ---
-  writeIfMissing(
-    join(agentDir, ".claude", "config.json"),
-    () =>
-      JSON.stringify(
-        { hasCompletedOnboarding: true, numStartups: 1 },
-        null,
-        2,
-      ) + "\n",
-    created,
-    skipped,
-    0o600,
-  );
+  // Try to copy from existing Claude installation; fall back to minimal config
+  const existingClaudeJson = findExistingClaudeJson();
+  if (existingClaudeJson) {
+    copyOnboardingState(existingClaudeJson, agentDir);
+    copyExistingCredentials(agentDir);
+    if (!existsSync(join(agentDir, ".claude", "config.json"))) {
+      // copyOnboardingState didn't write (file existed), write default
+      writeIfMissing(
+        join(agentDir, ".claude", "config.json"),
+        () =>
+          JSON.stringify(
+            { hasCompletedOnboarding: true, numStartups: 1 },
+            null,
+            2,
+          ) + "\n",
+        created,
+        skipped,
+        0o600,
+      );
+    }
+  } else {
+    // No existing Claude install — create minimal config
+    createMinimalClaudeConfig(agentDir);
+  }
+
+  // Pre-trust the agent's workspace directory
+  preTrustWorkspace(agentDir);
 
   // --- Memory index ---
   writeIfMissing(
@@ -254,7 +282,7 @@ export function scaffoldAgent(
   // --- Telegram access.json ---
   writeIfMissing(
     join(agentDir, "telegram", "access.json"),
-    () => buildAccessJson(agentConfig, telegramConfig, topicId),
+    () => buildAccessJson(agentConfig, telegramConfig, topicId, userId),
     created,
     skipped,
     0o600,
@@ -292,14 +320,22 @@ function buildAccessJson(
   agentConfig: AgentConfig,
   telegramConfig: TelegramConfig,
   resolvedTopicId?: number,
+  userId?: string,
 ): string {
+  const allowFrom = userId ? [userId] : [];
+  if (allowFrom.length === 0) {
+    console.warn(
+      "  WARNING: No user ID available for access.json allowFrom. " +
+      "DM the bot /start and run `clerk setup` again to pair your Telegram account."
+    );
+  }
   const access: Record<string, unknown> = {
     dmPolicy: "allowlist",
-    allowFrom: [],
+    allowFrom,
     groups: {
       [telegramConfig.forum_chat_id]: {
         requireMention: false,
-        allowFrom: [],
+        allowFrom,
       },
     },
   };

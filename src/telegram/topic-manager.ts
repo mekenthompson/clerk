@@ -235,3 +235,95 @@ export function resolveTopicId(
   const state = loadTopicState(statePath);
   return state.topics[agentName]?.topic_id ?? null;
 }
+
+/**
+ * Find orphaned topics — topics in the state file that are not in the current config.
+ * Returns the list of orphaned agent names and their topic IDs.
+ */
+export function findOrphanedTopics(
+  config: ClerkConfig,
+  statePath?: string
+): { agent: string; topic_id: number; topic_name: string }[] {
+  const state = loadTopicState(statePath);
+  const configAgents = new Set(Object.keys(config.agents));
+  const orphans: { agent: string; topic_id: number; topic_name: string }[] = [];
+
+  for (const [agentName, entry] of Object.entries(state.topics)) {
+    if (!configAgents.has(agentName)) {
+      orphans.push({
+        agent: agentName,
+        topic_id: entry.topic_id,
+        topic_name: entry.topic_name,
+      });
+    }
+  }
+
+  return orphans;
+}
+
+interface CloseForumTopicResponse {
+  ok: boolean;
+  description?: string;
+  error_code?: number;
+}
+
+/**
+ * Close (archive) a forum topic via the Telegram Bot API.
+ * Note: Telegram doesn't support deleting topics — only closing them.
+ */
+async function closeForumTopic(
+  botToken: string,
+  chatId: string,
+  messageThreadId: number
+): Promise<boolean> {
+  const url = `https://api.telegram.org/bot${botToken}/closeForumTopic`;
+
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: chatId,
+        message_thread_id: messageThreadId,
+      }),
+    });
+
+    const data = (await response.json()) as CloseForumTopicResponse;
+    return data.ok === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Clean up orphaned topics: close them in Telegram and remove from state.
+ */
+export async function cleanupOrphanedTopics(
+  config: ClerkConfig,
+  statePath?: string
+): Promise<{ agent: string; topic_id: number; closed: boolean }[]> {
+  const botToken = resolveBotToken(config.telegram.bot_token);
+  if (!botToken) {
+    throw new TopicSyncError(
+      "Cannot resolve bot token for cleanup."
+    );
+  }
+
+  const chatId = config.telegram.forum_chat_id;
+  const orphans = findOrphanedTopics(config, statePath);
+  const state = loadTopicState(statePath);
+  const results: { agent: string; topic_id: number; closed: boolean }[] = [];
+
+  for (const orphan of orphans) {
+    const closed = await closeForumTopic(botToken, chatId, orphan.topic_id);
+    delete state.topics[orphan.agent];
+    results.push({
+      agent: orphan.agent,
+      topic_id: orphan.topic_id,
+      closed,
+    });
+  }
+
+  saveTopicState(state, statePath);
+  return results;
+}
