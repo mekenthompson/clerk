@@ -16,7 +16,18 @@ Clerk manages multiple long-running Claude Code sessions, each with its own pers
 
 ## What Clerk Is NOT
 
-Clerk is **not a harness or wrapper**. It never intercepts Claude's authentication or inference. Each agent is a real `claude --channels` session, officially authenticated with your subscription. Clerk is scaffolding and lifecycle management — fully compliant with [Anthropic's usage policy](https://code.claude.com/docs/en/legal-and-compliance).
+Clerk is **not a harness or wrapper**. It never intercepts Claude's authentication or inference. Each agent is a real Claude Code session, officially authenticated with your subscription. Clerk is scaffolding and lifecycle management.
+
+### Anthropic Compliance
+
+Clerk is designed to work within Anthropic's published guidelines:
+
+- **Not a third-party harness**: Clerk never routes subscription credentials or inference requests. Each agent runs the unmodified `claude` CLI binary and authenticates directly with Anthropic via Claude Code's own OAuth flow.
+- **Uses official channels API**: Clerk's channel plugin uses the [documented MCP channels protocol](https://code.claude.com/docs/en/channels-reference) — the same `claude/channel` capability, `notifications/claude/channel` events, and stdio transport that Anthropic's own Telegram and Discord plugins use.
+- **Building custom channels is explicitly supported**: Anthropic's channels reference states "You can also build your own channel for systems that don't have a plugin yet" and provides detailed implementation guidance.
+- **No credential interception**: Authentication is handled entirely by Claude Code. Clerk never touches access tokens, refresh tokens, or OAuth flows.
+
+For full compliance analysis with citations and evidence, see [docs/compliance-attestation.md](docs/compliance-attestation.md).
 
 ## Quick Start
 
