@@ -76,14 +76,19 @@ This creates a forum topic for each agent and saves the mapping.
 ### 5. Authenticate each agent
 
 ```bash
-# Login all agents (opens browser for OAuth, one at a time)
-clerk auth login all
-
-# Or login individually
+# Interactive (if you have a terminal with stdin):
 clerk auth login health-coach
+
+# Or headless two-step (works over SSH, in scripts, via Telegram):
+clerk auth start health-coach       # Prints URL, saves PKCE state
+# Open URL in browser, sign in, copy code
+clerk auth complete health-coach <code>  # Exchanges code for tokens
+
+# Repeat for each agent, or use 'all' for interactive sequential login:
+clerk auth login all
 ```
 
-Each agent gets its own OAuth credentials. Your Max subscription is used.
+Each agent gets its own independent OAuth credentials. Your Max subscription is used. Tokens refresh automatically every 8 hours.
 
 ### 6. Initialize and start
 
@@ -205,7 +210,9 @@ clerk vault get <key>               # Retrieve a secret
 clerk vault list                    # List secret key names
 
 # Authentication
-clerk auth login <name|all>         # OAuth login per agent
+clerk auth login <name|all>         # Interactive OAuth login
+clerk auth start <name>             # Generate auth URL (headless step 1)
+clerk auth complete <name> <code>   # Exchange code for tokens (headless step 2)
 clerk auth status                   # Token status for all agents
 clerk auth refresh <name>           # Force token refresh
 

@@ -8,6 +8,7 @@ import {
   copySkills,
 } from "./templates.js";
 import { getHindsightSettingsEntry, getClerkMcpSettingsEntry } from "../memory/scaffold-integration.js";
+import { loadTopicState } from "../telegram/state.js";
 
 export interface ScaffoldResult {
   agentDir: string;
@@ -35,11 +36,20 @@ export function scaffoldAgent(
   const templatePath = getTemplatePath(agentConfig.template);
   const basePath = getBaseTemplatePath();
 
+  // Resolve topic ID: config takes priority, then topics.json state file
+  let topicId = agentConfig.topic_id;
+  if (topicId === undefined) {
+    try {
+      const topicState = loadTopicState();
+      topicId = topicState.topics?.[name]?.topic_id;
+    } catch { /* no state file yet */ }
+  }
+
   // Build the template rendering context
   const context: Record<string, unknown> = {
     name,
     agentDir,
-    topicId: agentConfig.topic_id,
+    topicId,
     topicName: agentConfig.topic_name,
     topicEmoji: agentConfig.topic_emoji,
     soul: agentConfig.soul,
@@ -147,7 +157,7 @@ export function scaffoldAgent(
   // --- Telegram access.json ---
   writeIfMissing(
     join(agentDir, "telegram", "access.json"),
-    () => buildAccessJson(agentConfig, telegramConfig),
+    () => buildAccessJson(agentConfig, telegramConfig, topicId),
     created,
     skipped,
     0o600,
@@ -181,12 +191,13 @@ function writeIfMissing(
 function buildAccessJson(
   agentConfig: AgentConfig,
   telegramConfig: TelegramConfig,
+  resolvedTopicId?: number,
 ): string {
   const access: Record<string, unknown> = {
     forum_chat_id: telegramConfig.forum_chat_id,
   };
-  if (agentConfig.topic_id !== undefined) {
-    access.topic_id = agentConfig.topic_id;
+  if (resolvedTopicId !== undefined) {
+    access.topic_id = resolvedTopicId;
   }
   return JSON.stringify(access, null, 2) + "\n";
 }
