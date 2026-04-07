@@ -8,6 +8,9 @@
     {{#if tools.deny}},
     "deny": [{{#each tools.deny}}"{{this}}"{{#unless @last}}, {{/unless}}{{/each}}]
     {{/if}}
+  },
+  "enabledPlugins": {
+    "telegram@claude-plugins-official": true
   }{{#if mcpServers}},
   "mcpServers": {{{json mcpServers}}}
   {{/if}}{{#if skipPermissionPrompt}},
