@@ -7,6 +7,11 @@
  * - message_thread_id in inbound notification metadata
  * - Thread-aware reply, photo, document, voice, video, video_note, sticker sending
  * - Auto-capture of thread_id per chat for seamless topic replies
+ * - Markdown-to-HTML conversion for rich formatting (default)
+ * - Smart HTML chunking that preserves tag boundaries
+ * - Inbound message coalescing (debounce rapid messages)
+ * - Typing indicator auto-refresh with exponential backoff
+ * - Robust error handling: 429 retry, thread-not-found fallback, network retry
  *
  * Self-contained MCP server with full access control: pairing, allowlists,
  * group support with mention-triggering. State lives in
@@ -110,10 +115,16 @@ type Access = {
   ackReaction?: string
   /** Which chunks get Telegram's reply reference when reply_to is passed. Default: 'first'. 'off' = never thread. */
   replyToMode?: 'off' | 'first' | 'all'
-  /** Max chars per outbound message before splitting. Default: 4096 (Telegram's hard cap). */
+  /** Max chars per outbound message before splitting. Default: 4000. */
   textChunkLimit?: number
   /** Split on paragraph boundaries instead of hard char count. */
   chunkMode?: 'length' | 'newline'
+  /** Default parse mode for outbound messages. 'html' (default), 'markdownv2', or 'text'. */
+  parseMode?: 'html' | 'markdownv2' | 'text'
+  /** Disable link previews in outbound messages. Default: true. */
+  disableLinkPreview?: boolean
+  /** Milliseconds to wait for additional rapid messages before delivering combined inbound. Default: 1500. */
+  coalescingGapMs?: number
 }
 
 function defaultAccess(): Access {
@@ -158,6 +169,9 @@ function readAccessFile(): Access {
       replyToMode: parsed.replyToMode,
       textChunkLimit: parsed.textChunkLimit,
       chunkMode: parsed.chunkMode,
+      parseMode: parsed.parseMode,
+      disableLinkPreview: parsed.disableLinkPreview,
+      coalescingGapMs: parsed.coalescingGapMs,
     }
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return defaultAccess()
@@ -393,6 +407,260 @@ function escapeMarkdownV2(text: string): string {
   return parts.join('')
 }
 
+// ---------------------------------------------------------------------------
+// Markdown → Telegram HTML conversion
+// ---------------------------------------------------------------------------
+
+/**
+ * Convert markdown to Telegram-compatible HTML.
+ * Handles bold, italic, code, code blocks, strikethrough, links.
+ * Escapes HTML entities in plain text. Wraps file references in <code>.
+ */
+export function markdownToHtml(text: string): string {
+  // First, extract code blocks and inline code to protect them from other transforms.
+  const codeBlocks: string[] = []
+  const BLOCK_PH = '\x00CODEBLOCK'
+  const INLINE_PH = '\x00CODEINLINE'
+
+  // Code blocks: ```lang\ncode\n```
+  let result = text.replace(/```(\w*)\n([\s\S]*?)```/g, (_m, lang: string, code: string) => {
+    const escaped = escapeHtml(code.replace(/\n$/, ''))
+    const cls = lang ? ` class="language-${lang}"` : ''
+    const idx = codeBlocks.length
+    codeBlocks.push(`<pre><code${cls}>${escaped}</code></pre>`)
+    return `${BLOCK_PH}${idx}\x00`
+  })
+
+  // Inline code: `code`
+  const inlineCodes: string[] = []
+  result = result.replace(/`([^`\n]+)`/g, (_m, code: string) => {
+    const idx = inlineCodes.length
+    inlineCodes.push(`<code>${escapeHtml(code)}</code>`)
+    return `${INLINE_PH}${idx}\x00`
+  })
+
+  // Escape HTML entities in remaining plain text
+  result = escapeHtml(result)
+
+  // Restore placeholders (they got entity-escaped, so fix them)
+  result = result.replace(new RegExp(`${escapeHtml(BLOCK_PH)}(\\d+)${escapeHtml('\x00')}`, 'g'), (_m, idx) => codeBlocks[Number(idx)])
+  result = result.replace(new RegExp(`${escapeHtml(INLINE_PH)}(\\d+)${escapeHtml('\x00')}`, 'g'), (_m, idx) => inlineCodes[Number(idx)])
+
+  // Bold: **text** (must come before italic)
+  result = result.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+
+  // Italic: *text* (single asterisk, not preceded by another *)
+  result = result.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '<i>$1</i>')
+
+  // Strikethrough: ~~text~~
+  result = result.replace(/~~(.+?)~~/g, '<s>$1</s>')
+
+  // Links: [text](url)
+  result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>')
+
+  // File references: wrap filename.ext patterns in <code> tags
+  // Match word chars, hyphens, dots followed by common extensions, but not inside existing tags
+  result = result.replace(/(?<![<\/\w])(\b[\w][\w.-]*\.(?:ts|js|py|rs|go|json|yaml|yml|toml|md|txt|sh|bash|zsh|css|html|xml|sql|env|cfg|conf|ini|log|csv|tsx|jsx|vue|svelte|rb|java|kt|swift|c|cpp|h|hpp|zig|asm|wasm|lock|mod|sum)\b)(?![^<]*>)/g, '<code>$1</code>')
+
+  return result
+}
+
+function escapeHtml(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+// ---------------------------------------------------------------------------
+// Smart HTML chunking — preserves open/close tag boundaries
+// ---------------------------------------------------------------------------
+
+/**
+ * Split HTML text into chunks that fit within maxLen, preserving tag integrity.
+ * At split boundaries, open tags are closed and reopened in the next chunk.
+ * Prefers splitting at \n\n, then \n, then spaces.
+ */
+export function splitHtmlChunks(html: string, maxLen = 4000): string[] {
+  if (html.length <= maxLen) return [html]
+
+  const chunks: string[] = []
+  let rest = html
+
+  while (rest.length > 0) {
+    if (rest.length <= maxLen) {
+      chunks.push(rest)
+      break
+    }
+
+    // Find a good split point
+    let cut = maxLen
+    const paraIdx = rest.lastIndexOf('\n\n', maxLen)
+    const lineIdx = rest.lastIndexOf('\n', maxLen)
+    const spaceIdx = rest.lastIndexOf(' ', maxLen)
+
+    if (paraIdx > maxLen / 3) {
+      cut = paraIdx
+    } else if (lineIdx > maxLen / 3) {
+      cut = lineIdx
+    } else if (spaceIdx > 0) {
+      cut = spaceIdx
+    }
+
+    let segment = rest.slice(0, cut)
+    rest = rest.slice(cut).replace(/^\n+/, '')
+
+    // Track open tags in this segment
+    const openTags = getOpenTags(segment)
+
+    // Close any open tags at the end of this chunk
+    for (let i = openTags.length - 1; i >= 0; i--) {
+      segment += `</${openTags[i]}>`
+    }
+    chunks.push(segment)
+
+    // Reopen tags at the start of the next chunk
+    if (rest.length > 0 && openTags.length > 0) {
+      const reopenPrefix = openTags.map(tag => {
+        // For tags with attributes (like <code class="...">), we'd need the full open tag.
+        // Our markdown conversion produces simple tags, so just reopen the tag name.
+        return `<${tag}>`
+      }).join('')
+      rest = reopenPrefix + rest
+    }
+  }
+
+  return chunks
+}
+
+/** Parse an HTML fragment and return the list of tags still open at the end. */
+function getOpenTags(html: string): string[] {
+  const tagStack: string[] = []
+  const tagRe = /<\/?([a-z][a-z0-9]*)[^>]*>/gi
+  let m: RegExpExecArray | null
+  while ((m = tagRe.exec(html)) !== null) {
+    const full = m[0]
+    const tagName = m[1].toLowerCase()
+    if (full.startsWith('</')) {
+      // Closing tag — pop from stack
+      const idx = tagStack.lastIndexOf(tagName)
+      if (idx !== -1) tagStack.splice(idx, 1)
+    } else if (!full.endsWith('/>')) {
+      // Opening tag (not self-closing)
+      tagStack.push(tagName)
+    }
+  }
+  return tagStack
+}
+
+type AttachmentMeta = {
+  kind: string
+  file_id: string
+  size?: number
+  mime?: string
+  name?: string
+}
+
+// ---------------------------------------------------------------------------
+// Inbound message coalescing — debounce rapid messages from the same sender
+// ---------------------------------------------------------------------------
+
+type CoalesceEntry = {
+  texts: string[]
+  ctx: Context
+  downloadImage?: () => Promise<string | undefined>
+  attachment?: AttachmentMeta
+  timer: ReturnType<typeof setTimeout>
+}
+
+const coalesceBuffer = new Map<string, CoalesceEntry>()
+
+function coalesceKey(chatId: string, userId: string): string {
+  return `${chatId}:${userId}`
+}
+
+// ---------------------------------------------------------------------------
+// Typing indicator auto-refresh with exponential backoff on errors
+// ---------------------------------------------------------------------------
+
+const typingIntervals = new Map<string, ReturnType<typeof setInterval>>()
+let typingBackoffMs = 0
+const TYPING_BACKOFF_MAX = 5 * 60 * 1000 // 5 min
+
+function startTypingLoop(chat_id: string): void {
+  stopTypingLoop(chat_id)
+  const send = () => {
+    bot.api.sendChatAction(chat_id, 'typing').then(
+      () => { typingBackoffMs = 0 }, // reset on success
+      (err) => {
+        const msg = err instanceof Error ? err.message : String(err)
+        if (msg.includes('401') || msg.includes('Unauthorized')) {
+          typingBackoffMs = Math.min(Math.max(typingBackoffMs * 2 || 1000, 1000), TYPING_BACKOFF_MAX)
+          stopTypingLoop(chat_id)
+          setTimeout(() => startTypingLoop(chat_id), typingBackoffMs)
+        }
+      },
+    )
+  }
+  send()
+  typingIntervals.set(chat_id, setInterval(send, 4000))
+}
+
+function stopTypingLoop(chat_id: string): void {
+  const iv = typingIntervals.get(chat_id)
+  if (iv) {
+    clearInterval(iv)
+    typingIntervals.delete(chat_id)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Robust API call wrapper — handles 429, 400 edge cases, network retries
+// ---------------------------------------------------------------------------
+
+async function robustApiCall<T>(fn: () => Promise<T>, opts?: { threadId?: number; chat_id?: string }): Promise<T> {
+  const MAX_RETRIES = 3
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    try {
+      return await fn()
+    } catch (err) {
+      const isGrammyErr = err instanceof GrammyError
+      const msg = err instanceof Error ? err.message : String(err)
+      const desc = isGrammyErr ? (err as GrammyError).description : msg
+
+      // 429 Too Many Requests — respect retry_after
+      if (isGrammyErr && (err as GrammyError).error_code === 429) {
+        const retryAfter = ((err as any).parameters?.retry_after ?? 5) as number
+        process.stderr.write(`telegram channel: 429 rate limited, waiting ${retryAfter}s\n`)
+        await new Promise(r => setTimeout(r, retryAfter * 1000))
+        continue
+      }
+
+      // 400 "message is not modified" — silent ignore
+      if (isGrammyErr && (err as GrammyError).error_code === 400 && desc.includes('not modified')) {
+        return undefined as unknown as T
+      }
+
+      // 400 "thread not found" — retry without thread
+      if (isGrammyErr && (err as GrammyError).error_code === 400 && desc.includes('thread not found') && opts?.threadId && opts?.chat_id) {
+        process.stderr.write(`telegram channel: thread not found, retrying without thread_id\n`)
+        // Caller should handle this — we rethrow a special error
+        throw Object.assign(new Error('THREAD_NOT_FOUND'), { original: err })
+      }
+
+      // Network errors — retry with backoff
+      if (!isGrammyErr && (msg.includes('ECONNRESET') || msg.includes('ETIMEDOUT') || msg.includes('fetch failed') || msg.includes('ENOTFOUND'))) {
+        if (attempt < MAX_RETRIES - 1) {
+          const delay = Math.pow(2, attempt) * 1000
+          process.stderr.write(`telegram channel: network error, retrying in ${delay / 1000}s: ${msg}\n`)
+          await new Promise(r => setTimeout(r, delay))
+          continue
+        }
+      }
+
+      throw err
+    }
+  }
+  throw new Error('robustApiCall: max retries exceeded')
+}
+
 const mcp = new Server(
   { name: 'telegram', version: '1.0.0' },
   {
@@ -417,7 +685,7 @@ const mcp = new Server(
       '',
       'If a message includes message_thread_id, it came from a forum topic. The reply tool will automatically route replies back to the same topic — no need to pass message_thread_id manually unless you want to override.',
       '',
-      'When using format: "markdownv2", special characters are auto-escaped outside code blocks/spans — just write natural markdown and it will render correctly in Telegram.',
+      'The default format is "html" — write natural markdown and it is auto-converted to Telegram HTML (bold, italic, code, links, code blocks). Use format: "markdownv2" for MarkdownV2 with auto-escaping, or "text" for plain text.',
       '',
       "Telegram's Bot API exposes no history or search — you only see messages as they arrive. If you need earlier context, ask the user to paste it or summarize.",
       '',
@@ -486,8 +754,12 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
           format: {
             type: 'string',
-            enum: ['text', 'markdownv2'],
-            description: "Rendering mode. 'markdownv2' enables Telegram formatting (bold, italic, code, links). Caller must escape special chars per MarkdownV2 rules. Default: 'text' (plain, no escaping needed).",
+            enum: ['html', 'markdownv2', 'text'],
+            description: "Rendering mode. 'html' (default) converts markdown to Telegram HTML. 'markdownv2' enables Telegram MarkdownV2 with auto-escaping. 'text' sends plain text.",
+          },
+          disable_web_page_preview: {
+            type: 'boolean',
+            description: 'Disable link preview thumbnails. Default: true (configurable via access.json disableLinkPreview).',
           },
         },
         required: ['chat_id', 'text'],
@@ -528,8 +800,8 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           text: { type: 'string' },
           format: {
             type: 'string',
-            enum: ['text', 'markdownv2'],
-            description: "Rendering mode. 'markdownv2' enables Telegram formatting (bold, italic, code, links). Caller must escape special chars per MarkdownV2 rules. Default: 'text' (plain, no escaping needed).",
+            enum: ['html', 'markdownv2', 'text'],
+            description: "Rendering mode. 'html' (default) converts markdown to Telegram HTML. 'markdownv2' enables Telegram MarkdownV2 with auto-escaping. 'text' sends plain text.",
           },
         },
         required: ['chat_id', 'message_id', 'text'],
@@ -596,16 +868,30 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const text = args.text as string
         const reply_to = args.reply_to != null ? Number(args.reply_to) : undefined
         const files = (args.files as string[] | undefined) ?? []
-        const format = (args.format as string | undefined) ?? 'text'
-        const parseMode = format === 'markdownv2' ? 'MarkdownV2' as const : undefined
+        const access = loadAccess()
+        const configParseMode = access.parseMode ?? 'html'
+        const format = (args.format as string | undefined) ?? configParseMode
+        const disableLinkPreview = args.disable_web_page_preview != null
+          ? Boolean(args.disable_web_page_preview)
+          : (access.disableLinkPreview ?? true)
+
+        let parseMode: 'HTML' | 'MarkdownV2' | undefined
+        let effectiveText: string
+        if (format === 'html') {
+          parseMode = 'HTML' as const
+          effectiveText = markdownToHtml(text)
+        } else if (format === 'markdownv2') {
+          parseMode = 'MarkdownV2' as const
+          effectiveText = escapeMarkdownV2(text)
+        } else {
+          parseMode = undefined
+          effectiveText = text
+        }
 
         assertAllowedChat(chat_id)
 
-        // Auto-escape MarkdownV2 special chars (preserving code blocks/spans)
-        const effectiveText = parseMode ? escapeMarkdownV2(text) : text
-
         // Resolve thread ID: explicit arg > auto-captured from inbound
-        const threadId = resolveThreadId(chat_id, args.message_thread_id as string | undefined)
+        let threadId = resolveThreadId(chat_id, args.message_thread_id as string | undefined)
 
         for (const f of files) {
           assertSendable(f)
@@ -615,12 +901,17 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           }
         }
 
-        const access = loadAccess()
-        const limit = Math.max(1, Math.min(access.textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT))
-        const mode = access.chunkMode ?? 'length'
+        const limit = Math.max(1, Math.min(access.textChunkLimit ?? 4000, MAX_CHUNK_LIMIT))
         const replyMode = access.replyToMode ?? 'first'
-        const chunks = chunk(effectiveText, limit, mode)
+
+        // Use smart HTML chunking for HTML mode, legacy chunking otherwise
+        const chunks = parseMode === 'HTML'
+          ? splitHtmlChunks(effectiveText, limit)
+          : chunk(effectiveText, limit, access.chunkMode ?? 'length')
         const sentIds: number[] = []
+
+        // Start typing indicator loop
+        startTypingLoop(chat_id)
 
         try {
           for (let i = 0; i < chunks.length; i++) {
@@ -628,18 +919,38 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
               reply_to != null &&
               replyMode !== 'off' &&
               (replyMode === 'all' || i === 0)
-            const sent = await bot.api.sendMessage(chat_id, chunks[i], {
+            const sendOpts = {
               ...(shouldReplyTo ? { reply_parameters: { message_id: reply_to } } : {}),
               ...(parseMode ? { parse_mode: parseMode } : {}),
               ...(threadId != null ? { message_thread_id: threadId } : {}),
-            })
-            sentIds.push(sent.message_id)
+              ...(disableLinkPreview ? { link_preview_options: { is_disabled: true } } : {}),
+            }
+            try {
+              const sent = await robustApiCall(
+                () => bot.api.sendMessage(chat_id, chunks[i], sendOpts),
+                { threadId, chat_id },
+              )
+              sentIds.push(sent.message_id)
+            } catch (err) {
+              // Handle thread-not-found: retry this chunk without thread_id
+              if (err instanceof Error && err.message === 'THREAD_NOT_FOUND') {
+                threadId = undefined
+                const retryOpts = { ...sendOpts }
+                delete (retryOpts as any).message_thread_id
+                const sent = await bot.api.sendMessage(chat_id, chunks[i], retryOpts)
+                sentIds.push(sent.message_id)
+              } else {
+                throw err
+              }
+            }
           }
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)
           throw new Error(
             `reply failed after ${sentIds.length} of ${chunks.length} chunk(s) sent: ${msg}`,
           )
+        } finally {
+          stopTypingLoop(chat_id)
         }
 
         // Files go as separate messages (Telegram doesn't mix text+file in one
@@ -654,10 +965,16 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
             ...(threadId != null ? { message_thread_id: threadId } : {}),
           }
           if (PHOTO_EXTS.has(ext)) {
-            const sent = await bot.api.sendPhoto(chat_id, input, baseOpts)
+            const sent = await robustApiCall(
+              () => bot.api.sendPhoto(chat_id, input, baseOpts),
+              { threadId, chat_id },
+            )
             sentIds.push(sent.message_id)
           } else {
-            const sent = await bot.api.sendDocument(chat_id, input, baseOpts)
+            const sent = await robustApiCall(
+              () => bot.api.sendDocument(chat_id, input, baseOpts),
+              { threadId, chat_id },
+            )
             sentIds.push(sent.message_id)
           }
         }
@@ -695,22 +1012,38 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       }
       case 'edit_message': {
         assertAllowedChat(args.chat_id as string)
-        const editFormat = (args.format as string | undefined) ?? 'text'
-        const editParseMode = editFormat === 'markdownv2' ? 'MarkdownV2' as const : undefined
-        const editText = editParseMode ? escapeMarkdownV2(args.text as string) : args.text as string
-        const edited = await bot.api.editMessageText(
-          args.chat_id as string,
-          Number(args.message_id),
-          editText,
-          ...(editParseMode ? [{ parse_mode: editParseMode }] : []),
+        const editAccess = loadAccess()
+        const editConfigMode = editAccess.parseMode ?? 'html'
+        const editFormat = (args.format as string | undefined) ?? editConfigMode
+        let editParseMode: 'HTML' | 'MarkdownV2' | undefined
+        let editText: string
+        if (editFormat === 'html') {
+          editParseMode = 'HTML' as const
+          editText = markdownToHtml(args.text as string)
+        } else if (editFormat === 'markdownv2') {
+          editParseMode = 'MarkdownV2' as const
+          editText = escapeMarkdownV2(args.text as string)
+        } else {
+          editParseMode = undefined
+          editText = args.text as string
+        }
+        const edited = await robustApiCall(
+          () => bot.api.editMessageText(
+            args.chat_id as string,
+            Number(args.message_id),
+            editText,
+            ...(editParseMode ? [{ parse_mode: editParseMode }] : []),
+          ),
         )
-        const id = typeof edited === 'object' ? edited.message_id : args.message_id
+        const id = typeof edited === 'object' && edited ? edited.message_id : args.message_id
         return { content: [{ type: 'text', text: `edited (id: ${id})` }] }
       }
       case 'send_typing': {
         assertAllowedChat(args.chat_id as string)
-        await bot.api.sendChatAction(args.chat_id as string, 'typing')
-        return { content: [{ type: 'text', text: 'typing indicator sent' }] }
+        startTypingLoop(args.chat_id as string)
+        // Auto-stop after 30s to prevent runaway loops
+        setTimeout(() => stopTypingLoop(args.chat_id as string), 30000)
+        return { content: [{ type: 'text', text: 'typing indicator sent (auto-refreshes every 4s, stops after 30s or next reply)' }] }
       }
       case 'pin_message': {
         assertAllowedChat(args.chat_id as string)
@@ -723,9 +1056,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const fwdMsgId = Number(args.message_id)
         assertAllowedChat(fwdChatId)
         const threadId = resolveThreadId(fwdChatId, args.message_thread_id as string | undefined)
-        const fwd = await bot.api.forwardMessage(fwdChatId, fwdFromChatId, fwdMsgId, {
-          ...(threadId != null ? { message_thread_id: threadId } : {}),
-        })
+        const fwd = await robustApiCall(
+          () => bot.api.forwardMessage(fwdChatId, fwdFromChatId, fwdMsgId, {
+            ...(threadId != null ? { message_thread_id: threadId } : {}),
+          }),
+          { threadId, chat_id: fwdChatId },
+        )
         return { content: [{ type: 'text', text: `forwarded (id: ${fwd.message_id})` }] }
       }
       default:
@@ -1091,7 +1427,7 @@ bot.on('callback_query:data', async ctx => {
 })
 
 bot.on('message:text', async ctx => {
-  await handleInbound(ctx, ctx.message.text, undefined)
+  await handleInboundCoalesced(ctx, ctx.message.text, undefined)
 })
 
 bot.on('message:photo', async ctx => {
@@ -1188,19 +1524,68 @@ bot.on('message:sticker', async ctx => {
   })
 })
 
-type AttachmentMeta = {
-  kind: string
-  file_id: string
-  size?: number
-  mime?: string
-  name?: string
-}
-
 // Filenames and titles are uploader-controlled. They land inside the <channel>
 // notification — delimiter chars would let the uploader break out of the tag
 // or forge a second meta entry.
 function safeName(s: string | undefined): string | undefined {
   return s?.replace(/[<>\[\]\r\n;]/g, '_')
+}
+
+/**
+ * Coalescing wrapper — buffers rapid text messages from the same user/chat,
+ * combines them with \n, and delivers after a gap of coalescingGapMs.
+ * Non-text messages (photos, documents, etc.) bypass coalescing.
+ */
+async function handleInboundCoalesced(
+  ctx: Context,
+  text: string,
+  downloadImage: (() => Promise<string | undefined>) | undefined,
+  attachment?: AttachmentMeta,
+): Promise<void> {
+  // Only coalesce plain text messages (no attachments, no images)
+  if (downloadImage || attachment) {
+    return handleInbound(ctx, text, downloadImage, attachment)
+  }
+
+  const access = loadAccess()
+  const gapMs = access.coalescingGapMs ?? 1500
+
+  // If coalescing is disabled (0), pass through directly
+  if (gapMs <= 0) {
+    return handleInbound(ctx, text, undefined, undefined)
+  }
+
+  const from = ctx.from
+  if (!from) return
+  const chatId = String(ctx.chat!.id)
+  const userId = String(from.id)
+  const key = coalesceKey(chatId, userId)
+
+  const existing = coalesceBuffer.get(key)
+  if (existing) {
+    // Add to existing buffer, reset timer
+    clearTimeout(existing.timer)
+    existing.texts.push(text)
+    existing.ctx = ctx // use latest message's context for metadata
+    existing.timer = setTimeout(() => flushCoalesce(key), gapMs)
+  } else {
+    // Start new buffer
+    const entry: CoalesceEntry = {
+      texts: [text],
+      ctx,
+      timer: setTimeout(() => flushCoalesce(key), gapMs),
+    }
+    coalesceBuffer.set(key, entry)
+  }
+}
+
+function flushCoalesce(key: string): void {
+  const entry = coalesceBuffer.get(key)
+  if (!entry) return
+  coalesceBuffer.delete(key)
+
+  const combinedText = entry.texts.join('\n')
+  void handleInbound(entry.ctx, combinedText, entry.downloadImage, entry.attachment)
 }
 
 async function handleInbound(

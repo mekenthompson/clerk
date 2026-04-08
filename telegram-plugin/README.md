@@ -65,6 +65,78 @@ bun server.ts
 
 ## Enhanced features
 
+### HTML formatting (default)
+
+Outbound messages now default to `"html"` parse mode. Markdown in reply/edit text is auto-converted to Telegram HTML:
+
+| Markdown | Telegram HTML |
+|----------|---------------|
+| `**bold**` | `<b>bold</b>` |
+| `*italic*` | `<i>italic</i>` |
+| `` `code` `` | `<code>code</code>` |
+| ```` ```lang\ncode\n``` ```` | `<pre><code class="language-lang">code</code></pre>` |
+| `~~strike~~` | `<s>strike</s>` |
+| `[text](url)` | `<a href="url">text</a>` |
+
+File references like `server.ts` or `package.json` are auto-wrapped in `<code>` tags. HTML entities (`<`, `>`, `&`) are escaped in plain text.
+
+The `format` parameter accepts `"html"` (default), `"markdownv2"`, or `"text"`. Configure the default via `parseMode` in `access.json`.
+
+### Smart HTML chunking
+
+Long HTML messages are split at paragraph (`\n\n`), line (`\n`), or space boundaries. Open HTML tags are automatically closed at chunk boundaries and reopened in the next chunk, preventing broken formatting.
+
+Default chunk limit: 4000 characters (configurable via `textChunkLimit` in `access.json`).
+
+### Inbound message coalescing
+
+Rapid consecutive messages from the same user/chat are buffered and combined into a single delivery (joined with `\n`). The buffer flushes after `coalescingGapMs` milliseconds of silence (default: 1500ms).
+
+This prevents fragmented context when users send multi-line thoughts across several quick messages. Non-text messages (photos, documents, etc.) bypass coalescing.
+
+Set `coalescingGapMs` to `0` in `access.json` to disable.
+
+### Typing indicator auto-refresh
+
+The `send_typing` tool now auto-refreshes the typing indicator every 4 seconds (Telegram's indicator expires after ~5s). Auto-stops after 30 seconds or when the next reply is sent.
+
+On 401/Unauthorized errors, uses exponential backoff (up to 5 min) and resets on success.
+
+### Error handling and retry
+
+All outbound API calls use robust error handling:
+
+| Error | Behavior |
+|-------|----------|
+| **429 Too Many Requests** | Wait `retry_after` seconds, then retry |
+| **400 "not modified"** | Silent ignore (edit with same content) |
+| **400 "thread not found"** | Retry without `message_thread_id` |
+| **Network errors** | Retry up to 3 times with exponential backoff |
+
+### Link preview control
+
+Link previews are disabled by default in outbound messages. Control via:
+- `disable_web_page_preview` parameter in the `reply` tool call
+- `disableLinkPreview` in `access.json` (default: `true`)
+
+### Configurable settings in access.json
+
+```json
+{
+  "textChunkLimit": 4000,
+  "parseMode": "html",
+  "disableLinkPreview": true,
+  "coalescingGapMs": 1500
+}
+```
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `textChunkLimit` | number | 4000 | Max chars per outbound message before splitting |
+| `parseMode` | `"html"` \| `"markdownv2"` \| `"text"` | `"html"` | Default parse mode for outbound messages |
+| `disableLinkPreview` | boolean | `true` | Disable link preview thumbnails |
+| `coalescingGapMs` | number | 1500 | Debounce gap for inbound message coalescing (0 = disabled) |
+
 ### Read receipt indicator
 
 When an inbound message is received, the plugin immediately reacts with an emoji to indicate it was seen. Configure via `ackReaction` in `access.json`:
@@ -170,6 +242,19 @@ Commands are intercepted by Grammy's command handlers *before* reaching the gene
 - Commands work in both DM and group/topic contexts.
 - In groups, only users in the group's allowlist can execute commands.
 - Commands are registered with BotFather automatically on startup.
+
+## Testing
+
+```bash
+cd telegram-plugin
+bun test
+```
+
+Tests cover:
+- `markdownToHtml` — bold, italic, code, code blocks, links, strikethrough, escaping, file references, nested formatting
+- `splitHtmlChunks` — basic splitting, tag preservation across boundaries, paragraph-preference splitting, nested tags
+- File reference wrapping — various extensions, complex filenames, non-file patterns
+- Coalescing logic — key uniqueness, message combining, newline handling
 
 ## Use case: multi-agent orchestration
 
