@@ -1200,39 +1200,53 @@ function isAuthorizedSender(ctx: Context): boolean {
 }
 
 /** Send a reply, respecting message_thread_id for forum topics. */
-async function clerkReply(ctx: Context, text: string): Promise<void> {
+async function clerkReply(ctx: Context, text: string, options: { html?: boolean } = {}): Promise<void> {
   const chatId = String(ctx.chat!.id)
   const threadId = resolveThreadId(chatId, ctx.message?.message_thread_id)
   await ctx.reply(text, {
     ...(threadId != null ? { message_thread_id: threadId } : {}),
+    ...(options.html ? { parse_mode: 'HTML' as const, link_preview_options: { is_disabled: true } } : {}),
   })
 }
 
-/** Wrap text in a monospace code block for Telegram. */
-function codeBlock(text: string): string {
-  // Use triple backtick; escape any existing triple backtick inside
-  const escaped = text.replace(/```/g, '` ` `')
-  return '```\n' + escaped + '\n```'
+/** Strip ANSI color codes from text. */
+function stripAnsi(text: string): string {
+  // Match ESC[ ... letter sequences
+  return text.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
+}
+
+/** Escape HTML special characters for Telegram HTML parse mode. */
+function escapeHtmlForTg(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+/** Wrap text in an HTML <pre> block for Telegram (monospace). */
+function preBlock(text: string): string {
+  return '<pre>' + escapeHtmlForTg(text) + '</pre>'
 }
 
 /** Execute a clerk command and reply with the result. */
 async function runClerkCommand(ctx: Context, args: string[], label: string): Promise<void> {
   try {
-    const output = clerkExec(args)
+    const output = stripAnsi(clerkExec(args))
     const formatted = formatClerkOutput(output)
-    await clerkReply(ctx, formatted ? codeBlock(formatted) : `${label}: done (no output)`)
+    if (formatted) {
+      await clerkReply(ctx, preBlock(formatted), { html: true })
+    } else {
+      await clerkReply(ctx, `${label}: done (no output)`)
+    }
   } catch (err: unknown) {
     const error = err as { status?: number; stderr?: string; message?: string }
     if (error.message?.includes('ENOENT')) {
-      await clerkReply(ctx, 'clerk CLI not found. Ensure `clerk` is on PATH or set CLERK_CLI_PATH.')
+      await clerkReply(ctx, 'clerk CLI not found. Ensure <code>clerk</code> is on PATH or set CLERK_CLI_PATH.', { html: true })
       return
     }
     if (error.message?.includes('ETIMEDOUT') || error.message?.includes('timed out')) {
       await clerkReply(ctx, `${label}: command timed out after 15s`)
       return
     }
-    const detail = error.stderr?.trim() || error.message || 'unknown error'
-    await clerkReply(ctx, `${label} failed:\n${codeBlock(formatClerkOutput(detail))}`)
+    const detail = stripAnsi(error.stderr?.trim() || error.message || 'unknown error')
+    await clerkReply(ctx, `<b>${escapeHtmlForTg(label)} failed:</b>\n${preBlock(formatClerkOutput(detail))}`, { html: true })
   }
 }
 
