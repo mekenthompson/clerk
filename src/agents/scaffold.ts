@@ -9,6 +9,7 @@ import {
   copySkills,
 } from "./templates.js";
 import { getHindsightSettingsEntry, getClerkMcpSettingsEntry } from "../memory/scaffold-integration.js";
+import type { McpServerConfig } from "../memory/hindsight.js";
 import { loadTopicState } from "../telegram/state.js";
 import { isVaultReference, parseVaultReference } from "../vault/resolver.js";
 import {
@@ -114,6 +115,16 @@ const CLERK_TELEGRAM_MCP_TOOLS = [
 ];
 
 /**
+ * Pre-approved MCP tool names for the Hindsight memory server.
+ * When the memory backend is hindsight we pre-approve the wildcard so
+ * the agent can recall and store memories without prompting.
+ */
+const HINDSIGHT_MCP_TOOLS = [
+  "mcp__hindsight",
+  "mcp__hindsight__*",
+];
+
+/**
  * Attempt to locate the clerk CLI binary. Used to populate CLERK_CLI_PATH
  * in the .mcp.json env for the clerk-telegram MCP server. Falls back to
  * the literal string "clerk" if `which clerk` is unavailable.
@@ -187,9 +198,13 @@ export function scaffoldAgent(
   const baseAllow = hasAllWildcard
     ? []
     : rawAllow.filter((t) => t !== "all");
-  const permissionAllow = agentConfig.use_clerk_plugin === true
-    ? [...baseAllow, ...CLERK_TELEGRAM_MCP_TOOLS]
-    : baseAllow;
+  const memoryBackend = clerkConfig?.memory?.backend;
+  const hindsightEnabled = memoryBackend === "hindsight";
+  const permissionAllow = [
+    ...baseAllow,
+    ...(agentConfig.use_clerk_plugin === true ? CLERK_TELEGRAM_MCP_TOOLS : []),
+    ...(hindsightEnabled ? HINDSIGHT_MCP_TOOLS : []),
+  ];
 
   // Build the template rendering context
   const context: Record<string, unknown> = {
@@ -286,19 +301,27 @@ export function scaffoldAgent(
         ? resolve(clerkConfigPath)
         : resolve(process.cwd(), "clerk.yaml");
 
-      const mcpJson = {
-        mcpServers: {
-          "clerk-telegram": {
-            command: "bun",
-            args: ["run", "--cwd", pluginDir, "--shell=bun", "--silent", "start"],
-            env: {
-              TELEGRAM_STATE_DIR: join(agentDir, "telegram"),
-              CLERK_CONFIG: resolvedConfigPath,
-              CLERK_CLI_PATH: clerkCliPath,
-            },
+      const mcpServers: Record<string, McpServerConfig> = {
+        "clerk-telegram": {
+          command: "bun",
+          args: ["run", "--cwd", pluginDir, "--shell=bun", "--silent", "start"],
+          env: {
+            TELEGRAM_STATE_DIR: join(agentDir, "telegram"),
+            CLERK_CONFIG: resolvedConfigPath,
+            CLERK_CLI_PATH: clerkCliPath,
           },
         },
       };
+
+      // Add hindsight memory MCP if configured
+      if (hindsightEnabled && clerkConfig) {
+        const hindsightEntry = getHindsightSettingsEntry(name, clerkConfig);
+        if (hindsightEntry) {
+          mcpServers[hindsightEntry.key] = hindsightEntry.value;
+        }
+      }
+
+      const mcpJson = { mcpServers };
 
       writeFileSync(
         mcpJsonPath,
