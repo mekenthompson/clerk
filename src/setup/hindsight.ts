@@ -102,7 +102,7 @@ export function getHindsightMcpUrl(): {
   url: string;
 } {
   return {
-    url: "http://localhost:8888/mcp",
+    url: "http://localhost:8888/mcp/",
   };
 }
 

@@ -1,6 +1,7 @@
 import type { ClerkConfig, MemoryBackendConfig } from "../config/schema.js";
 
 export interface McpServerConfig {
+  type?: string;
   command?: string;
   args?: string[];
   env?: Record<string, string>;
@@ -10,15 +11,21 @@ export interface McpServerConfig {
 /**
  * Generate the MCP server config entry for Hindsight.
  *
- * Hindsight exposes MCP via Streamable HTTP at http://localhost:8888/mcp.
- * This works with Claude Code's HTTP MCP transport and is simpler than docker exec.
+ * Hindsight exposes MCP via Streamable HTTP at /mcp/. The host/port can be
+ * overridden in clerk.yaml's memory.config.url; defaults to localhost:8888
+ * (the upstream default). Note that 8888 conflicts with Coolify and other
+ * common services — host the container on 18888 and set memory.config.url
+ * accordingly.
  */
 export function generateHindsightMcpConfig(
   _collection: string,
-  _memoryConfig: MemoryBackendConfig,
+  memoryConfig: MemoryBackendConfig,
 ): McpServerConfig {
+  const url = (memoryConfig.config?.url as string | undefined)
+    ?? "http://localhost:8888/mcp/";
   return {
-    url: "http://localhost:8888/mcp",
+    type: "http",
+    url,
   };
 }
 

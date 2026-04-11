@@ -127,6 +127,10 @@ export const MemoryBackendConfigSchema = z.object({
         .boolean()
         .default(true)
         .describe("Whether to include Hindsight in docker-compose"),
+      url: z
+        .string()
+        .optional()
+        .describe("Hindsight MCP endpoint URL (e.g., http://localhost:18888/mcp/). Defaults to http://localhost:8888/mcp/."),
     })
     .optional(),
 });

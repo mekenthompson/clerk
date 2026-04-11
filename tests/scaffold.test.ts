@@ -346,7 +346,40 @@ describe("scaffoldAgent", () => {
 
     expect(settings.mcpServers).toBeDefined();
     expect(settings.mcpServers.hindsight).toBeDefined();
-    expect(settings.mcpServers.hindsight.url).toBe("http://localhost:8888/mcp");
+    expect(settings.mcpServers.hindsight.url).toBe("http://localhost:8888/mcp/");
+    expect(settings.mcpServers.hindsight.type).toBe("http");
+  });
+
+  it("respects memory.config.url override for Hindsight MCP", () => {
+    const agentConfig = makeAgentConfig();
+    const clerkConfig: ClerkConfig = {
+      clerk: { version: 1, agents_dir: tmpDir },
+      telegram: telegramConfig,
+      memory: {
+        backend: "hindsight",
+        shared_collection: "shared",
+        config: {
+          provider: "ollama",
+          docker_service: true,
+          url: "http://localhost:18888/mcp/",
+        },
+      },
+      agents: { "memory-agent": agentConfig },
+    } as ClerkConfig;
+
+    const result = scaffoldAgent(
+      "memory-agent",
+      agentConfig,
+      tmpDir,
+      telegramConfig,
+      clerkConfig,
+    );
+
+    const settings = JSON.parse(
+      readFileSync(join(result.agentDir, ".claude", "settings.json"), "utf-8"),
+    );
+
+    expect(settings.mcpServers.hindsight.url).toBe("http://localhost:18888/mcp/");
   });
 });
 
