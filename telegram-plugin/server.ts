@@ -98,16 +98,23 @@ function endStatusReaction(
 }
 
 /**
- * The chat_id currently being processed by Claude Code, as inferred from
- * the most recent `queue-operation enqueue` event in the session JSONL.
+ * Per-turn state tracked from the session JSONL tail.
  *
  * Session events (thinking, tool_use, text, tool_result, turn_end) all
  * apply to whichever chat the model is currently working on. Since
  * Claude Code processes turns serially, this is a single global value —
  * not a per-chat map. When a new enqueue arrives, the focus shifts.
+ *
+ * The `capturedText` and `replyToolCalled` fields exist for the orphaned-
+ * reply backstop: occasionally the model ends a turn with an assistant
+ * text content block but never calls the reply tool. The user sees no
+ * response. We catch this in turn_end and forward the captured text via
+ * the bot API directly.
  */
 let currentSessionChatId: string | null = null
-let currentSessionThreadId: string | undefined = undefined
+let currentSessionThreadId: number | undefined = undefined
+let currentTurnReplyCalled = false
+let currentTurnCapturedText: string[] = []
 
 /**
  * Active draft streams, keyed by `${chat_id}:${thread_id ?? "_"}`.
@@ -1455,29 +1462,30 @@ if (sessionTailEnabled) {
  * controller is currently active for the in-flight chat. Bookkeeping is
  * minimal: we trust the JSONL ordering (Claude processes turns serially),
  * so the most recent `enqueue` is the chat we're currently working on.
+ *
+ * Also implements the orphaned-reply backstop: if a turn ends with text
+ * content blocks but no reply tool call, we forward the captured text
+ * via bot.api.sendMessage so the user actually sees a response.
  */
 function handleSessionEvent(ev: SessionEvent): void {
   switch (ev.kind) {
     case 'enqueue': {
-      // The model is about to process this chat. Capture the focus so
-      // subsequent events (thinking/tool_use/etc.) get routed correctly.
+      // The model is about to process this chat. Reset turn tracking and
+      // capture the focus so subsequent events route correctly.
       if (ev.chatId) {
         currentSessionChatId = ev.chatId
-        currentSessionThreadId = ev.threadId != null ? Number(ev.threadId) as unknown as undefined : undefined
-        // Note: handleInbound has already created the controller and set
-        // 👀; we don't need to do anything here. This case mostly exists
-        // for debugging and to track focus.
+        currentSessionThreadId = ev.threadId != null ? Number(ev.threadId) : undefined
+        currentTurnReplyCalled = false
+        currentTurnCapturedText = []
       }
       return
     }
     case 'dequeue': {
-      // The model has accepted the message into its working set. The
-      // next assistant event will be its real first action.
       return
     }
     case 'thinking': {
       // Promote the controller to 🤔 immediately rather than waiting for
-      // the 2-second hardcoded timer in handleInbound.
+      // the hardcoded timer in handleInbound.
       if (currentSessionChatId == null) return
       const ctrl = activeStatusReactions.get(statusKey(currentSessionChatId, currentSessionThreadId))
       if (ctrl) ctrl.setThinking()
@@ -1486,10 +1494,15 @@ function handleSessionEvent(ev: SessionEvent): void {
     case 'tool_use': {
       if (currentSessionChatId == null) return
       const ctrl = activeStatusReactions.get(statusKey(currentSessionChatId, currentSessionThreadId))
-      if (!ctrl) return
-      // The clerk-telegram tools (reply, stream_reply, react, etc.) have
-      // their own meaning — they're the "I'm sending you something" stage.
       const name = ev.toolName
+      // Track that the model called the reply tool — this is the signal
+      // we use in turn_end to decide whether the orphaned-reply backstop
+      // should fire.
+      if (name === 'mcp__clerk-telegram__reply'
+        || name === 'mcp__clerk-telegram__stream_reply') {
+        currentTurnReplyCalled = true
+      }
+      if (!ctrl) return
       if (name === 'mcp__clerk-telegram__reply'
         || name === 'mcp__clerk-telegram__stream_reply'
         || name === 'mcp__clerk-telegram__edit_message'
@@ -1503,26 +1516,77 @@ function handleSessionEvent(ev: SessionEvent): void {
       return
     }
     case 'text': {
-      // Plain text in an assistant message means the model is composing
-      // a final answer (often happens before the reply tool fires). Treat
-      // as "still working" — don't promote past tool state.
+      // Capture model-generated text. If the turn ends without a reply
+      // tool call, we forward this via the orphaned-reply backstop. If
+      // a reply WAS called, this is a post-reply meta-summary the model
+      // sometimes emits — silently ignored.
+      if (currentSessionChatId != null) {
+        currentTurnCapturedText.push(ev.text)
+      }
       return
     }
     case 'tool_result': {
-      // Used to be a "done" signal but the tool_use_id mapping is fragile;
-      // we rely on the reply tool handler's own setDone() instead.
       return
     }
     case 'turn_end': {
-      // Backstop: if the reply tool handler missed the setDone for some
-      // reason (e.g., the model used `text` content instead of calling
-      // reply), make sure the controller terminates.
       if (currentSessionChatId == null) return
-      const ctrl = activeStatusReactions.get(statusKey(currentSessionChatId, currentSessionThreadId))
+      const chatId = currentSessionChatId
+      const threadId = currentSessionThreadId
+      const ctrl = activeStatusReactions.get(statusKey(chatId, threadId))
+
+      // Orphaned-reply backstop: the model finished a turn without
+      // calling the reply tool. Forward the captured text so the user
+      // doesn't get silence. We send via bot.api.sendMessage directly
+      // since the model has already finished and won't call reply.
+      if (!currentTurnReplyCalled && currentTurnCapturedText.length > 0) {
+        const text = currentTurnCapturedText.join('\n').trim()
+        if (text) {
+          process.stderr.write(
+            `telegram channel: orphaned-reply backstop firing — model produced ${text.length} chars of text without calling reply tool, forwarding via bot API\n`,
+          )
+          // Convert markdown / HTML the same way the reply tool does
+          const sendOpts = {
+            parse_mode: 'HTML' as const,
+            ...(threadId != null ? { message_thread_id: threadId } : {}),
+            link_preview_options: { is_disabled: true },
+          }
+          const renderedText = markdownToHtml(text)
+          const limit = 4000
+          const chunks = splitHtmlChunks(renderedText, limit)
+          // Fire async — don't block the session-tail loop
+          void (async () => {
+            try {
+              for (const chunk of chunks) {
+                await bot.api.sendMessage(chatId, chunk, sendOpts)
+              }
+              if (ctrl) ctrl.setDone()
+            } catch (err) {
+              process.stderr.write(
+                `telegram channel: orphaned-reply backstop failed: ${(err as Error).message}\n`,
+              )
+              if (ctrl) ctrl.setError()
+            } finally {
+              activeStatusReactions.delete(statusKey(chatId, threadId))
+            }
+          })()
+          // Reset state and return early — the async branch will clean up
+          currentSessionChatId = null
+          currentSessionThreadId = undefined
+          currentTurnReplyCalled = false
+          currentTurnCapturedText = []
+          return
+        }
+      }
+
+      // Normal path: terminate the controller cleanly. The reply tool's
+      // own setDone() may already have fired — that's fine, the
+      // controller's terminal state is idempotent.
       if (ctrl) ctrl.setDone()
-      activeStatusReactions.delete(statusKey(currentSessionChatId, currentSessionThreadId))
+      activeStatusReactions.delete(statusKey(chatId, threadId))
       currentSessionChatId = null
       currentSessionThreadId = undefined
+      currentTurnReplyCalled = false
+      currentTurnCapturedText = []
       return
     }
   }
