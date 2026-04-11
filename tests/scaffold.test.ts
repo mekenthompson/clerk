@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { scaffoldAgent, reconcileAgent } from "../src/agents/scaffold.js";
+import { scaffoldAgent, reconcileAgent, installAutoRecallHook } from "../src/agents/scaffold.js";
 import { renderTemplate } from "../src/agents/templates.js";
 import type { AgentConfig, ClerkConfig, TelegramConfig } from "../src/config/schema.js";
 
@@ -582,6 +582,167 @@ describe("reconcileAgent", () => {
     const after = JSON.parse(readFileSync(settingsPath, "utf-8"));
     expect(after.permissions.allow).not.toContain("mcp__hindsight__*");
     expect(after.mcpServers.hindsight).toBeUndefined();
+  });
+});
+
+describe("installAutoRecallHook", () => {
+  let tmpDir: string;
+  let agentDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "clerk-hook-"));
+    agentDir = join(tmpDir, "agent");
+    mkdirSync(join(agentDir, ".claude"), { recursive: true });
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("returns null when memory backend is not hindsight", () => {
+    const config: ClerkConfig = {
+      clerk: { version: 1, agents_dir: tmpDir },
+      telegram: telegramConfig,
+      memory: { backend: "none", shared_collection: "shared" },
+      agents: { agent: { template: "default", topic_name: "x", schedule: [] } },
+    } as ClerkConfig;
+    expect(installAutoRecallHook("agent", agentDir, config)).toBeNull();
+  });
+
+  it("returns null when agent has memory.auto_recall: false", () => {
+    const config: ClerkConfig = {
+      clerk: { version: 1, agents_dir: tmpDir },
+      telegram: telegramConfig,
+      memory: { backend: "hindsight", shared_collection: "shared" },
+      agents: {
+        agent: {
+          template: "default",
+          topic_name: "x",
+          schedule: [],
+          memory: { collection: "general", auto_recall: false, isolation: "default" },
+        },
+      },
+    } as ClerkConfig;
+    expect(installAutoRecallHook("agent", agentDir, config)).toBeNull();
+  });
+
+  it("copies the hook script and returns a hook command when configured", () => {
+    const config: ClerkConfig = {
+      clerk: { version: 1, agents_dir: tmpDir },
+      telegram: telegramConfig,
+      memory: {
+        backend: "hindsight",
+        shared_collection: "shared",
+        config: { provider: "openai", docker_service: true, url: "http://127.0.0.1:18888/mcp/" },
+      },
+      agents: {
+        agent: {
+          template: "default",
+          topic_name: "x",
+          schedule: [],
+          memory: { collection: "general", auto_recall: true, isolation: "default" },
+        },
+      },
+    } as ClerkConfig;
+    const result = installAutoRecallHook("agent", agentDir, config);
+    expect(result).not.toBeNull();
+    expect(result!.scriptPath).toBe(join(agentDir, ".claude", "hooks", "auto-recall.sh"));
+    expect(existsSync(result!.scriptPath)).toBe(true);
+    // Hook command should reference the script + the env vars
+    expect(result!.hookCommand).toContain("CLERK_HINDSIGHT_BANK=general");
+    expect(result!.hookCommand).toContain("CLERK_HINDSIGHT_URL=http://127.0.0.1:18888");
+    expect(result!.hookCommand).toContain("auto-recall.sh");
+  });
+
+  it("falls back to agent name when no explicit collection is set", () => {
+    const config: ClerkConfig = {
+      clerk: { version: 1, agents_dir: tmpDir },
+      telegram: telegramConfig,
+      memory: { backend: "hindsight", shared_collection: "shared" },
+      agents: { coach: { template: "default", topic_name: "x", schedule: [] } },
+    } as ClerkConfig;
+    mkdirSync(join(tmpDir, "coach", ".claude"), { recursive: true });
+    const result = installAutoRecallHook("coach", join(tmpDir, "coach"), config);
+    expect(result).not.toBeNull();
+    expect(result!.hookCommand).toContain("CLERK_HINDSIGHT_BANK=coach");
+  });
+});
+
+describe("scaffoldAgent installs the auto-recall hook in settings.json", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "clerk-scaffold-hook-"));
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("writes a UserPromptSubmit entry referencing the auto-recall script", () => {
+    const agentConfig = makeAgentConfig({
+      memory: { collection: "general", auto_recall: true, isolation: "default" },
+    });
+    const config: ClerkConfig = {
+      clerk: { version: 1, agents_dir: tmpDir },
+      telegram: telegramConfig,
+      memory: {
+        backend: "hindsight",
+        shared_collection: "shared",
+        config: { provider: "openai", docker_service: true, url: "http://127.0.0.1:18888/mcp/" },
+      },
+      agents: { hook_agent: agentConfig },
+    } as ClerkConfig;
+
+    const result = scaffoldAgent("hook_agent", agentConfig, tmpDir, telegramConfig, config);
+    const settings = JSON.parse(
+      readFileSync(join(result.agentDir, ".claude", "settings.json"), "utf-8"),
+    );
+    expect(settings.hooks?.UserPromptSubmit).toBeDefined();
+    expect(settings.hooks.UserPromptSubmit).toHaveLength(1);
+    const hook = settings.hooks.UserPromptSubmit[0];
+    expect(hook.type).toBe("command");
+    expect(hook.command).toContain("auto-recall.sh");
+    expect(hook.command).toContain("CLERK_HINDSIGHT_BANK=general");
+
+    // Hook script was copied to the agent dir
+    expect(existsSync(join(result.agentDir, ".claude", "hooks", "auto-recall.sh"))).toBe(true);
+  });
+
+  it("reconcile removes the hook when memory backend is disabled", () => {
+    const agentConfig = makeAgentConfig({
+      memory: { collection: "general", auto_recall: true, isolation: "default" },
+    });
+    const withMemory: ClerkConfig = {
+      clerk: { version: 1, agents_dir: tmpDir },
+      telegram: telegramConfig,
+      memory: {
+        backend: "hindsight",
+        shared_collection: "shared",
+        config: { provider: "openai", docker_service: true, url: "http://127.0.0.1:18888/mcp/" },
+      },
+      agents: { hook_agent: agentConfig },
+    } as ClerkConfig;
+    scaffoldAgent("hook_agent", agentConfig, tmpDir, telegramConfig, withMemory);
+
+    // Confirm the hook was installed
+    const beforeSettings = JSON.parse(
+      readFileSync(join(tmpDir, "hook_agent", ".claude", "settings.json"), "utf-8"),
+    );
+    expect(beforeSettings.hooks?.UserPromptSubmit).toBeDefined();
+
+    // Now disable memory and reconcile
+    const withoutMemory: ClerkConfig = {
+      ...withMemory,
+      memory: { backend: "none", shared_collection: "shared" },
+    } as ClerkConfig;
+    reconcileAgent("hook_agent", agentConfig, tmpDir, telegramConfig, withoutMemory);
+
+    const afterSettings = JSON.parse(
+      readFileSync(join(tmpDir, "hook_agent", ".claude", "settings.json"), "utf-8"),
+    );
+    // Hook entry should be gone (or empty)
+    expect(afterSettings.hooks?.UserPromptSubmit ?? []).toEqual([]);
   });
 });
 

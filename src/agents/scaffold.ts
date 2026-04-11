@@ -177,6 +177,77 @@ const ALL_BUILTIN_TOOLS = [
 ];
 
 /**
+ * Resolve the source path of the auto-recall hook script in the clerk
+ * install directory. The script is copied into each agent's
+ * .claude/hooks/auto-recall.sh on scaffold and reconcile, so the
+ * agent's hook lifecycle survives clerk install-dir changes.
+ */
+function resolveHookSourcePath(): string {
+  return resolve(import.meta.dirname, "../../bin/auto-recall-hook.sh");
+}
+
+/**
+ * Install (or refresh) the Hindsight auto-recall hook for an agent.
+ * Copies the hook script into the agent's .claude/hooks/ directory.
+ *
+ * Returns the metadata needed to patch settings.json with the
+ * UserPromptSubmit hook entry, or null if memory.backend is not
+ * hindsight or memory.auto_recall is explicitly disabled.
+ */
+export interface AutoRecallHookInstall {
+  scriptPath: string;
+  hookCommand: string;
+}
+
+export function installAutoRecallHook(
+  agentName: string,
+  agentDir: string,
+  clerkConfig: ClerkConfig | undefined,
+): AutoRecallHookInstall | null {
+  if (!clerkConfig) return null;
+  const memory = clerkConfig.memory;
+  if (memory?.backend !== "hindsight") return null;
+
+  const agentMemory = clerkConfig.agents[agentName]?.memory;
+  if (agentMemory?.auto_recall === false) return null;
+
+  // Resolve the bank/collection name (per-agent override or fall back to agent name)
+  const bank = agentMemory?.collection ?? agentName;
+
+  // Resolve the Hindsight base URL: strip the /mcp/ suffix from
+  // memory.config.url since the hook calls the REST endpoint, not MCP
+  const mcpUrl = (memory.config?.url as string | undefined) ?? "http://127.0.0.1:8888/mcp/";
+  const baseUrl = mcpUrl.replace(/\/mcp\/?$/, "").replace(/\/$/, "");
+
+  // Copy the hook script into the agent's .claude/hooks dir
+  const sourcePath = resolveHookSourcePath();
+  if (!existsSync(sourcePath)) {
+    // Hook source missing — install dir layout has changed. Skip silently
+    // rather than fail the whole reconcile.
+    return null;
+  }
+  const hooksDir = join(agentDir, ".claude", "hooks");
+  mkdirSync(hooksDir, { recursive: true });
+  const destPath = join(hooksDir, "auto-recall.sh");
+  copyFileSync(sourcePath, destPath);
+  chmodSync(destPath, 0o755);
+
+  // Build the hook command — env vars are passed inline so the script
+  // receives the right bank/URL even when CLAUDE_CONFIG_DIR moves.
+  // bash -c form is required because settings.json hooks aren't a shell
+  // expression by default; we wrap so the env vars get exported.
+  const hookCommand = `CLERK_HINDSIGHT_URL=${shellEscape(baseUrl)} CLERK_HINDSIGHT_BANK=${shellEscape(bank)} ${shellEscape(destPath)}`;
+
+  return { scriptPath: destPath, hookCommand };
+}
+
+/** Minimal POSIX shell escape for embedded paths/env values. */
+function shellEscape(s: string): string {
+  if (/^[A-Za-z0-9_./:@%+=-]+$/.test(s)) return s;
+  return "'" + s.replace(/'/g, "'\\''") + "'";
+}
+
+/**
  * Attempt to locate the clerk CLI binary. Used to populate CLERK_CLI_PATH
  * in the .mcp.json env for the clerk-telegram MCP server. Falls back to
  * the literal string "clerk" if `which clerk` is unavailable.
@@ -332,6 +403,15 @@ export function scaffoldAgent(
       const clerkMcpEntry = getClerkMcpSettingsEntry();
       if (!settings.mcpServers[clerkMcpEntry.key]) {
         settings.mcpServers[clerkMcpEntry.key] = clerkMcpEntry.value;
+      }
+
+      // Hindsight auto-recall hook (UserPromptSubmit)
+      const hookInstall = installAutoRecallHook(name, agentDir, clerkConfig);
+      if (hookInstall) {
+        settings.hooks = settings.hooks ?? {};
+        settings.hooks.UserPromptSubmit = [
+          { type: "command", command: hookInstall.hookCommand },
+        ];
       }
 
       writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n", "utf-8");
@@ -570,6 +650,27 @@ export function reconcileAgent(
     }
 
     settings.mcpServers = mcpServers;
+
+    // Hindsight auto-recall hook (UserPromptSubmit). Always re-install
+    // so script updates from `clerk update` propagate.
+    const hookInstall = installAutoRecallHook(name, agentDir, clerkConfig);
+    if (hookInstall) {
+      settings.hooks = settings.hooks ?? {};
+      settings.hooks.UserPromptSubmit = [
+        { type: "command", command: hookInstall.hookCommand },
+      ];
+    } else if (settings.hooks?.UserPromptSubmit) {
+      // Memory backend was disabled — clean up the hook entry but
+      // preserve other UserPromptSubmit hooks the user may have added.
+      const filtered = (settings.hooks.UserPromptSubmit as Array<{ command?: string }>)
+        .filter((h) => !(h.command ?? "").includes("auto-recall.sh"));
+      if (filtered.length === 0) {
+        delete settings.hooks.UserPromptSubmit;
+        if (Object.keys(settings.hooks).length === 0) delete settings.hooks;
+      } else {
+        settings.hooks.UserPromptSubmit = filtered;
+      }
+    }
 
     const after = JSON.stringify(settings, null, 2) + "\n";
     if (after !== before) {
