@@ -1,10 +1,24 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { getAuthStatus, formatTimeUntilExpiry, loginAgent, refreshAgent } from "../src/auth/manager.js";
 
 describe("formatTimeUntilExpiry", () => {
+  // Lock the clock so the test math doesn't drift across minute boundaries
+  // mid-test (the previous version was flaky exactly when you'd run it
+  // right at the end of a minute — `Date.now() + 5h23m` then call the
+  // formatter which used a fresh `Date.now()` and could read a different
+  // minute, returning "5h 22m" instead of "5h 23m").
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-12T03:00:00Z"));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("returns hours and minutes for future timestamps", () => {
     const fiveHoursFromNow = Date.now() + 5 * 60 * 60_000 + 23 * 60_000;
     expect(formatTimeUntilExpiry(fiveHoursFromNow)).toBe("5h 23m");
@@ -21,7 +35,6 @@ describe("formatTimeUntilExpiry", () => {
   });
 
   it("returns 'expired' for current timestamp", () => {
-    // Slightly in the past to avoid race
     expect(formatTimeUntilExpiry(Date.now() - 1)).toBe("expired");
   });
 

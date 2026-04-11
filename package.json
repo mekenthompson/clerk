@@ -9,7 +9,9 @@
   "scripts": {
     "dev": "bun bin/clerk.ts",
     "build": "bun build bin/clerk.ts --outdir dist --target node",
-    "test": "vitest run",
+    "test": "vitest run && bun test telegram-plugin/tests/history.test.ts",
+    "test:vitest": "vitest run",
+    "test:bun": "bun test telegram-plugin/tests/history.test.ts",
     "test:watch": "vitest",
     "lint": "tsc --noEmit"
   },

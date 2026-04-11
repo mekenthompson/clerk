@@ -220,6 +220,40 @@ describe('telegram bot commands', () => {
       expect(fullArgs).toEqual(['agent', 'list'])
     })
   })
+
+  describe('self-targeting command detection', () => {
+    // Locks the contract behind the /restart, /reconcile, /update self-kill
+    // fix in server.ts. The bot needs to detect when a clerk subcommand
+    // would SIGTERM its own systemd unit (mid-execFileSync) and switch to
+    // a detached spawn instead. The detection is "agent name == basename(cwd)
+    // OR target == 'all'". See spawnClerkDetached + isSelfTargetingCommand
+    // in telegram-plugin/server.ts.
+    function isSelfTargetingCommand(name: string, myAgentName: string): boolean {
+      if (name === 'all') return true
+      return name === myAgentName
+    }
+
+    it('detects self-restart by exact name match', () => {
+      expect(isSelfTargetingCommand('assistant', 'assistant')).toBe(true)
+      expect(isSelfTargetingCommand('coach', 'assistant')).toBe(false)
+    })
+
+    it('detects "all" as always self-targeting', () => {
+      expect(isSelfTargetingCommand('all', 'assistant')).toBe(true)
+      expect(isSelfTargetingCommand('all', 'coach')).toBe(true)
+    })
+
+    it('does not match prefixes or substrings', () => {
+      // Defensive: a malicious agent named "assistant-evil" should NOT
+      // be considered self for an agent named "assistant".
+      expect(isSelfTargetingCommand('assistant-evil', 'assistant')).toBe(false)
+      expect(isSelfTargetingCommand('assi', 'assistant')).toBe(false)
+    })
+
+    it('is case-sensitive (matches systemd unit naming)', () => {
+      expect(isSelfTargetingCommand('Assistant', 'assistant')).toBe(false)
+    })
+  })
 })
 
 // afterAll import for the clerk CLI path test

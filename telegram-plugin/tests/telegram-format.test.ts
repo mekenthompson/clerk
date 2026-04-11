@@ -234,6 +234,69 @@ describe('isLikelyTelegramHtml', () => {
   })
 })
 
+describe('markdownToHtml regression: mixed markdown + raw Telegram HTML', () => {
+  // The exact bug pattern from the user-facing screenshot regression: model
+  // emits markdown bold AND raw <b>/<a> tags in the same message. The
+  // markdown path used to escape every `<` to `&lt;`, so the raw tags
+  // rendered as literal text. Now the converter preserves whitelisted
+  // Telegram HTML tags through the escape pass.
+
+  test('preserves embedded <b> when text also has markdown bold', () => {
+    const input = '**Pattern worth stealing:** the <b>verification subagent</b> is a validator.'
+    const out = markdownToHtml(input)
+    expect(out).toContain('<b>Pattern worth stealing:</b>')
+    expect(out).toContain('<b>verification subagent</b>')
+    expect(out).not.toContain('&lt;b&gt;')
+  })
+
+  test('preserves embedded <a href> when text also has markdown bold', () => {
+    const input = '**Sources:** see <a href="https://example.com/x">Example</a> for details.'
+    const out = markdownToHtml(input)
+    expect(out).toContain('<b>Sources:</b>')
+    expect(out).toContain('<a href="https://example.com/x">Example</a>')
+    expect(out).not.toContain('&lt;a ')
+  })
+
+  test('preserves embedded <i> when text also has markdown bold', () => {
+    const input = '**Rule:** group work by <i>what context it needs</i>.'
+    const out = markdownToHtml(input)
+    expect(out).toContain('<b>Rule:</b>')
+    expect(out).toContain('<i>what context it needs</i>')
+    expect(out).not.toContain('&lt;i&gt;')
+  })
+
+  test('preserves multiple embedded tags in one message', () => {
+    const input = '**Header**\n- <b>Context</b> matters\n- <i>Speed</i> too\n- See <a href="https://x.com">x</a>'
+    const out = markdownToHtml(input)
+    expect(out).toContain('<b>Header</b>')
+    expect(out).toContain('<b>Context</b>')
+    expect(out).toContain('<i>Speed</i>')
+    expect(out).toContain('<a href="https://x.com">x</a>')
+  })
+
+  test('still escapes unsupported tags even when whitelisted ones are present', () => {
+    const input = '**hi** <b>ok</b> and <div>bad</div>'
+    const out = markdownToHtml(input)
+    expect(out).toContain('<b>hi</b>')
+    expect(out).toContain('<b>ok</b>')
+    // <div> is not in the whitelist → escaped
+    expect(out).toContain('&lt;div&gt;')
+  })
+
+  test('preserves embedded <code> spans alongside markdown', () => {
+    const input = '**Run:** <code>git status</code> first.'
+    const out = markdownToHtml(input)
+    expect(out).toContain('<b>Run:</b>')
+    expect(out).toContain('<code>git status</code>')
+  })
+
+  test('preserves <a> with query-string href containing markdown-link-like text', () => {
+    const input = 'See <a href="https://example.com/path">the docs</a>.'
+    const out = markdownToHtml(input)
+    expect(out).toContain('<a href="https://example.com/path">the docs</a>')
+  })
+})
+
 describe('markdownToHtml regression: HTML in code spans', () => {
   test('renders **bold** correctly when text also contains `<b>` in inline code', () => {
     const input = '**1. Raw HTML rendering** — replies showed `<b>tag</b>` text instead of bold.'
