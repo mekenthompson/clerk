@@ -4,7 +4,20 @@ export NVM_DIR="$HOME/.nvm"
 export PATH="$HOME/.bun/bin:$PATH"
 export CLAUDE_CONFIG_DIR="{{agentDir}}/.claude"
 export TELEGRAM_STATE_DIR="{{agentDir}}/telegram"
+{{#if hindsightEnabled}}
+# Hindsight memory plugin (vendored at .claude/plugins/hindsight-memory/).
+# Reads env vars at hook startup; settings.json autoMemoryEnabled: false
+# disables Claude Code's built-in file-based auto-memory so we don't run
+# two memory systems against each other.
+export HINDSIGHT_API_URL="{{hindsightApiBaseUrl}}"
+export HINDSIGHT_BANK_ID="{{hindsightBankId}}"
+export HINDSIGHT_AUTO_RECALL=true
+export HINDSIGHT_AUTO_RETAIN=true
+export HINDSIGHT_AGENT_NAME="{{name}}"
+{{#if hindsightApiToken}}export HINDSIGHT_API_TOKEN="{{hindsightApiToken}}"
+{{/if}}
+{{/if}}
 cd "{{agentDir}}"
-{{#if useClerkPlugin}}exec claude --dangerously-load-development-channels server:clerk-telegram{{#if dangerousMode}} --dangerously-skip-permissions{{/if}}
-{{else}}exec claude --channels plugin:telegram@claude-plugins-official{{#if dangerousMode}} --dangerously-skip-permissions{{/if}}
+{{#if useClerkPlugin}}exec claude --dangerously-load-development-channels server:clerk-telegram{{#if hindsightEnabled}} --plugin-dir "{{agentDir}}/.claude/plugins/hindsight-memory"{{/if}}{{#if dangerousMode}} --dangerously-skip-permissions{{/if}}
+{{else}}exec claude --channels plugin:telegram@claude-plugins-official{{#if hindsightEnabled}} --plugin-dir "{{agentDir}}/.claude/plugins/hindsight-memory"{{/if}}{{#if dangerousMode}} --dangerously-skip-permissions{{/if}}
 {{/if}}

@@ -1,4 +1,15 @@
-import { existsSync, mkdirSync, writeFileSync, readFileSync, chmodSync, symlinkSync, copyFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  chmodSync,
+  symlinkSync,
+  copyFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+} from "node:fs";
 import { execSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import type { AgentConfig, ClerkConfig, TelegramConfig } from "../config/schema.js";
@@ -177,33 +188,66 @@ const ALL_BUILTIN_TOOLS = [
 ];
 
 /**
- * Resolve the source path of the auto-recall hook script in the clerk
- * install directory. The script is copied into each agent's
- * .claude/hooks/auto-recall.sh on scaffold and reconcile, so the
- * agent's hook lifecycle survives clerk install-dir changes.
+ * Recursively copy a directory tree, overwriting existing files. Used to
+ * deploy vendored plugin files into each agent's .claude/plugins/ dir.
  */
-function resolveHookSourcePath(): string {
-  return resolve(import.meta.dirname, "../../bin/auto-recall-hook.sh");
+function copyDirRecursive(src: string, dest: string): void {
+  if (!existsSync(src)) return;
+  mkdirSync(dest, { recursive: true });
+  for (const entry of readdirSync(src)) {
+    const srcPath = join(src, entry);
+    const destPath = join(dest, entry);
+    const s = statSync(srcPath);
+    if (s.isDirectory()) {
+      copyDirRecursive(srcPath, destPath);
+    } else {
+      copyFileSync(srcPath, destPath);
+      // Preserve executable bit for hook scripts (cleared on copy by default)
+      if (s.mode & 0o100) {
+        chmodSync(destPath, s.mode);
+      }
+    }
+  }
 }
 
 /**
- * Install (or refresh) the Hindsight auto-recall hook for an agent.
- * Copies the hook script into the agent's .claude/hooks/ directory.
- *
- * Returns the metadata needed to patch settings.json with the
- * UserPromptSubmit hook entry, or null if memory.backend is not
- * hindsight or memory.auto_recall is explicitly disabled.
+ * Vendored hindsight-memory plugin location inside the clerk repo.
+ * Pinned to the version we ship; updated by `clerk update`.
  */
-export interface AutoRecallHookInstall {
-  scriptPath: string;
-  hookCommand: string;
+function resolveHindsightVendorPath(): string {
+  return resolve(import.meta.dirname, "../../vendor/hindsight-memory");
 }
 
-export function installAutoRecallHook(
+/**
+ * Result of installing the vendored hindsight-memory plugin into an agent.
+ */
+export interface HindsightPluginInstall {
+  pluginDir: string;
+  apiBaseUrl: string;
+  bankId: string;
+}
+
+/**
+ * Install (or refresh) the vendored hindsight-memory plugin for an agent.
+ *
+ * Copies the plugin tree into <agentDir>/.claude/plugins/hindsight-memory/
+ * and returns the metadata needed by the start.sh template to set
+ * env vars and the --plugin-dir flag.
+ *
+ * Returns null when:
+ *  - clerk.yaml memory backend is not hindsight
+ *  - the agent has memory.auto_recall: false
+ *  - the vendored plugin source isn't present (e.g., bare clerk install
+ *    without the vendor dir)
+ *
+ * The plugin reads its config from environment variables (HINDSIGHT_*)
+ * which start.sh exports — see templates/_base/start.sh.hbs.
+ */
+export function installHindsightPlugin(
   agentName: string,
   agentDir: string,
   clerkConfig: ClerkConfig | undefined,
-): AutoRecallHookInstall | null {
+): HindsightPluginInstall | null {
   if (!clerkConfig) return null;
   const memory = clerkConfig.memory;
   if (memory?.backend !== "hindsight") return null;
@@ -211,40 +255,29 @@ export function installAutoRecallHook(
   const agentMemory = clerkConfig.agents[agentName]?.memory;
   if (agentMemory?.auto_recall === false) return null;
 
-  // Resolve the bank/collection name (per-agent override or fall back to agent name)
-  const bank = agentMemory?.collection ?? agentName;
-
-  // Resolve the Hindsight base URL: strip the /mcp/ suffix from
-  // memory.config.url since the hook calls the REST endpoint, not MCP
-  const mcpUrl = (memory.config?.url as string | undefined) ?? "http://127.0.0.1:8888/mcp/";
-  const baseUrl = mcpUrl.replace(/\/mcp\/?$/, "").replace(/\/$/, "");
-
-  // Copy the hook script into the agent's .claude/hooks dir
-  const sourcePath = resolveHookSourcePath();
+  const sourcePath = resolveHindsightVendorPath();
   if (!existsSync(sourcePath)) {
-    // Hook source missing — install dir layout has changed. Skip silently
-    // rather than fail the whole reconcile.
     return null;
   }
-  const hooksDir = join(agentDir, ".claude", "hooks");
-  mkdirSync(hooksDir, { recursive: true });
-  const destPath = join(hooksDir, "auto-recall.sh");
-  copyFileSync(sourcePath, destPath);
-  chmodSync(destPath, 0o755);
 
-  // Build the hook command — env vars are passed inline so the script
-  // receives the right bank/URL even when CLAUDE_CONFIG_DIR moves.
-  // bash -c form is required because settings.json hooks aren't a shell
-  // expression by default; we wrap so the env vars get exported.
-  const hookCommand = `CLERK_HINDSIGHT_URL=${shellEscape(baseUrl)} CLERK_HINDSIGHT_BANK=${shellEscape(bank)} ${shellEscape(destPath)}`;
+  // Copy the vendored plugin into the agent's .claude/plugins dir.
+  // Force overwrite on every reconcile so plugin updates from
+  // `clerk update` propagate.
+  const destPath = join(agentDir, ".claude", "plugins", "hindsight-memory");
+  if (existsSync(destPath)) {
+    rmSync(destPath, { recursive: true, force: true });
+  }
+  copyDirRecursive(sourcePath, destPath);
 
-  return { scriptPath: destPath, hookCommand };
-}
+  // Resolve the agent's bank/collection name and the Hindsight REST URL.
+  // The plugin's hooks expect HINDSIGHT_API_URL (the REST base), not the
+  // /mcp/ MCP endpoint URL — strip the suffix.
+  const bankId = agentMemory?.collection ?? agentName;
+  const mcpUrl = (memory.config?.url as string | undefined)
+    ?? "http://127.0.0.1:8888/mcp/";
+  const apiBaseUrl = mcpUrl.replace(/\/mcp\/?$/, "").replace(/\/$/, "");
 
-/** Minimal POSIX shell escape for embedded paths/env values. */
-function shellEscape(s: string): string {
-  if (/^[A-Za-z0-9_./:@%+=-]+$/.test(s)) return s;
-  return "'" + s.replace(/'/g, "'\\''") + "'";
+  return { pluginDir: destPath, apiBaseUrl, bankId };
 }
 
 /**
@@ -330,6 +363,17 @@ export function scaffoldAgent(
     ...CLERK_MCP_TOOLS,
   ]);
 
+  // Compute Hindsight plugin context for the start.sh + settings.json
+  // templates. Mirrors installHindsightPlugin's gating logic so the
+  // template only emits the env vars and --plugin-dir flag when the
+  // plugin will actually be installed.
+  const hindsightAutoRecallEnabled = hindsightEnabled
+    && agentConfig.memory?.auto_recall !== false;
+  const hindsightBankId = agentConfig.memory?.collection ?? name;
+  const hindsightApiBaseUrl = (clerkConfig?.memory?.config?.url as string | undefined)
+    ? (clerkConfig!.memory!.config!.url as string).replace(/\/mcp\/?$/, "").replace(/\/$/, "")
+    : "http://127.0.0.1:8888";
+
   // Build the template rendering context
   const context: Record<string, unknown> = {
     name,
@@ -350,6 +394,9 @@ export function scaffoldAgent(
     dangerousMode: agentConfig.dangerous_mode === true,
     skipPermissionPrompt: agentConfig.skip_permission_prompt === true,
     useClerkPlugin: agentConfig.use_clerk_plugin === true,
+    hindsightEnabled: hindsightAutoRecallEnabled,
+    hindsightBankId,
+    hindsightApiBaseUrl,
   };
 
   // --- Create directory structure ---
@@ -405,18 +452,36 @@ export function scaffoldAgent(
         settings.mcpServers[clerkMcpEntry.key] = clerkMcpEntry.value;
       }
 
-      // Hindsight auto-recall hook (UserPromptSubmit). Claude Code's
-      // schema is { matcher, hooks: [{type, command}] } per settings —
-      // each entry is a matcher group, not a flat command list.
-      const hookInstall = installAutoRecallHook(name, agentDir, clerkConfig);
-      if (hookInstall) {
-        settings.hooks = settings.hooks ?? {};
-        settings.hooks.UserPromptSubmit = [
-          {
-            matcher: "",
-            hooks: [{ type: "command", command: hookInstall.hookCommand }],
-          },
-        ];
+      // Hindsight memory plugin install (replaces our old shell hook).
+      // The vendored plugin's own hooks.json wires SessionStart /
+      // UserPromptSubmit / Stop / SessionEnd via Claude Code's plugin
+      // loader once start.sh passes --plugin-dir.
+      installHindsightPlugin(name, agentDir, clerkConfig);
+
+      // Disable Claude Code's built-in auto-memory so the model doesn't
+      // get dueling instructions (write to local .md files vs use
+      // Hindsight). The settings flag gates the memory system-prompt
+      // block at the source.
+      const hindsightOn = clerkConfig.memory?.backend === "hindsight"
+        && clerkConfig.agents[name]?.memory?.auto_recall !== false;
+      if (hindsightOn) {
+        settings.autoMemoryEnabled = false;
+      }
+
+      // Clean up the legacy hooks.UserPromptSubmit shell hook entry from
+      // any prior scaffolds. The plugin owns this hook now.
+      if (settings.hooks?.UserPromptSubmit) {
+        const filtered = (settings.hooks.UserPromptSubmit as Array<{
+          hooks?: Array<{ command?: string }>
+        }>).filter((group) =>
+          !(group.hooks ?? []).some((h) => (h.command ?? "").includes("auto-recall.sh"))
+        );
+        if (filtered.length === 0) {
+          delete settings.hooks.UserPromptSubmit;
+          if (Object.keys(settings.hooks).length === 0) delete settings.hooks;
+        } else {
+          settings.hooks.UserPromptSubmit = filtered;
+        }
       }
 
       writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n", "utf-8");
@@ -656,25 +721,27 @@ export function reconcileAgent(
 
     settings.mcpServers = mcpServers;
 
-    // Hindsight auto-recall hook (UserPromptSubmit). Always re-install
-    // so script updates from `clerk update` propagate.
-    //
-    // Schema (per Claude Code): each top-level entry is a matcher group:
-    //   [{ matcher: "...", hooks: [{ type: "command", command: "..." }] }]
-    // The matcher is a string — for UserPromptSubmit it's ignored, but
-    // an empty string or omission means "match all".
-    const hookInstall = installAutoRecallHook(name, agentDir, clerkConfig);
-    if (hookInstall) {
-      settings.hooks = settings.hooks ?? {};
-      settings.hooks.UserPromptSubmit = [
-        {
-          matcher: "",
-          hooks: [{ type: "command", command: hookInstall.hookCommand }],
-        },
-      ];
-    } else if (settings.hooks?.UserPromptSubmit) {
-      // Memory backend was disabled — clean up the hook entry but
-      // preserve other UserPromptSubmit groups the user may have added.
+    // Hindsight memory plugin: vendored from vectorize-io/hindsight,
+    // copied into <agentDir>/.claude/plugins/hindsight-memory/. The
+    // plugin's own hooks.json registers SessionStart / UserPromptSubmit /
+    // Stop / SessionEnd hooks via Claude Code's plugin loader. Always
+    // re-copy on reconcile so plugin updates propagate via
+    // `clerk update` → reconcile.
+    installHindsightPlugin(name, agentDir, clerkConfig);
+
+    // Disable Claude Code's built-in auto-memory when Hindsight is on.
+    // This stops the dueling-instruction problem (see research notes
+    // for cli.js bl8() and the autoMemoryEnabled settings key).
+    if (hindsightEnabled) {
+      settings.autoMemoryEnabled = false;
+    } else if (settings.autoMemoryEnabled === false) {
+      // Memory backend was disabled — restore the default
+      delete settings.autoMemoryEnabled;
+    }
+
+    // Clean up any leftover legacy shell hook entries from prior
+    // scaffolds. The vendored plugin owns UserPromptSubmit now.
+    if (settings.hooks?.UserPromptSubmit) {
       const filtered = (settings.hooks.UserPromptSubmit as Array<{
         hooks?: Array<{ command?: string }>
       }>).filter((group) =>

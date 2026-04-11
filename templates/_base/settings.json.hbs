@@ -6,7 +6,8 @@
   },
   "enabledPlugins": {
     "telegram@claude-plugins-official": true
-  }{{#if mcpServers}},
+  }{{#if hindsightEnabled}},
+  "autoMemoryEnabled": false{{/if}}{{#if mcpServers}},
   "mcpServers": {{{json mcpServers}}}
   {{/if}}{{#if skipPermissionPrompt}},
   "skipDangerousModePermissionPrompt": true
