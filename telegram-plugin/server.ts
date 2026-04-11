@@ -1485,6 +1485,75 @@ bot.command('reconcile', async ctx => {
   )
 })
 
+// /grant <agent> <tool> — add a tool permission to an agent and reconcile
+// (single-arg form: /grant <tool> applies to "assistant" if it's the only agent
+//  or to the first agent name in clerk.yaml — convenient for single-agent setups)
+bot.command('grant', async ctx => {
+  if (!isAuthorizedSender(ctx)) return
+  const parts = (ctx.match ?? '').trim().split(/\s+/).filter(Boolean)
+  if (parts.length === 0) {
+    await clerkReply(ctx, 'Usage: /grant <agent> <tool>  or  /grant <tool> (single-agent shortcut)')
+    return
+  }
+  let agentName: string
+  let tool: string
+  if (parts.length === 1) {
+    // Single-arg shortcut: pick first agent from `clerk agent list --json`
+    const list = clerkExecJson<{ agents: Array<{ name: string }> }>(['agent', 'list'])
+    if (!list || list.agents.length === 0) {
+      await clerkReply(ctx, 'No agents defined in clerk.yaml')
+      return
+    }
+    agentName = list.agents[0].name
+    tool = parts[0]
+  } else {
+    agentName = parts[0]
+    tool = parts.slice(1).join(' ')
+  }
+  await runClerkCommand(
+    ctx,
+    ['agent', 'grant', agentName, tool],
+    `grant ${agentName} ${tool}`,
+  )
+})
+
+// /dangerous [agent] [off] — toggle full tool access
+bot.command('dangerous', async ctx => {
+  if (!isAuthorizedSender(ctx)) return
+  const parts = (ctx.match ?? '').trim().split(/\s+/).filter(Boolean)
+  let agentName: string
+  let off = false
+  if (parts.length === 0) {
+    const list = clerkExecJson<{ agents: Array<{ name: string }> }>(['agent', 'list'])
+    if (!list || list.agents.length === 0) {
+      await clerkReply(ctx, 'No agents defined in clerk.yaml')
+      return
+    }
+    agentName = list.agents[0].name
+  } else {
+    agentName = parts[0]
+    if (parts[1] === 'off') off = true
+  }
+  const args = ['agent', 'dangerous', agentName]
+  if (off) args.push('--off')
+  await runClerkCommand(ctx, args, `dangerous ${agentName}${off ? ' off' : ''}`)
+})
+
+// /permissions [agent] — show current allow list
+bot.command('permissions', async ctx => {
+  if (!isAuthorizedSender(ctx)) return
+  let agentName = (ctx.match ?? '').trim()
+  if (!agentName) {
+    const list = clerkExecJson<{ agents: Array<{ name: string }> }>(['agent', 'list'])
+    if (!list || list.agents.length === 0) {
+      await clerkReply(ctx, 'No agents defined in clerk.yaml')
+      return
+    }
+    agentName = list.agents[0].name
+  }
+  await runClerkCommand(ctx, ['agent', 'permissions', agentName], `permissions ${agentName}`)
+})
+
 // /update — git pull, reinstall, reconcile, restart agents
 bot.command('update', async ctx => {
   if (!isAuthorizedSender(ctx)) return
@@ -1561,6 +1630,12 @@ bot.command('clerkhelp', async ctx => {
     '/doctor - Health check (deps, vault, hindsight, services, MCP)',
     '/reconcile [name|all] - Re-apply clerk.yaml to existing agents',
     '/update - Pull latest, reinstall deps, reconcile, restart',
+    '',
+    'Permissions',
+    '/permissions [agent] - Show current allow/deny list',
+    '/grant [agent] <tool> - Grant a tool permission and reconcile',
+    '/dangerous [agent] [off] - Toggle full tool access (every built-in tool)',
+    '',
     '/clerkhelp - Show this help message',
     '',
     'These commands run the clerk CLI directly — no AI tokens used.',
@@ -1583,6 +1658,9 @@ async function registerClerkBotCommands(): Promise<void> {
     { command: 'doctor', description: 'Health check (deps, vault, services, MCP)' },
     { command: 'reconcile', description: 'Re-apply clerk.yaml to existing agents' },
     { command: 'update', description: 'Pull latest, reinstall, reconcile, restart' },
+    { command: 'permissions', description: 'Show agent permissions' },
+    { command: 'grant', description: 'Grant a tool permission to an agent' },
+    { command: 'dangerous', description: 'Toggle full tool access for an agent' },
     { command: 'clerkhelp', description: 'Show all clerk bot commands' },
   ]
 

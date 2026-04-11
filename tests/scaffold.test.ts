@@ -115,15 +115,19 @@ describe("scaffoldAgent", () => {
       readFileSync(join(result.agentDir, ".claude", "settings.json"), "utf-8"),
     );
 
-    expect(settings.permissions.allow).toEqual(["calendar", "notion"]);
+    // Always pre-approves the clerk MCP wildcards alongside user-listed tools
+    expect(settings.permissions.allow).toContain("calendar");
+    expect(settings.permissions.allow).toContain("notion");
+    expect(settings.permissions.allow).toContain("mcp__clerk__*");
     expect(settings.permissions.deny).toEqual(["bash"]);
     expect(settings.permissions.defaultMode).toBeUndefined();
   });
 
-  it("translates tools.allow: [all] into defaultMode: acceptEdits", () => {
+  it("expands tools.allow: [all] into the full built-in tool list", () => {
     // Claude Code rejects the literal string "all" in permissions.allow.
     // When users write `tools.allow: [all]` in clerk.yaml, the scaffold
-    // should translate that into an empty allow list + defaultMode: acceptEdits.
+    // expands it to the full set of built-in Claude Code tools so the
+    // agent never blocks on a runtime permission prompt.
     const config = makeAgentConfig({
       tools: { allow: ["all"], deny: [] },
     });
@@ -132,8 +136,14 @@ describe("scaffoldAgent", () => {
       readFileSync(join(result.agentDir, ".claude", "settings.json"), "utf-8"),
     );
 
-    expect(settings.permissions.allow).toEqual([]);
+    // Critical built-ins must be present
+    for (const t of ["Bash", "Read", "Write", "Edit", "WebFetch", "WebSearch", "Glob", "Grep"]) {
+      expect(settings.permissions.allow).toContain(t);
+    }
+    // Backstop defaultMode is also set
     expect(settings.permissions.defaultMode).toBe("acceptEdits");
+    // No literal "all" leaks through
+    expect(settings.permissions.allow).not.toContain("all");
   });
 
   it("pre-approves clerk-telegram MCP tool names when use_clerk_plugin is true", () => {

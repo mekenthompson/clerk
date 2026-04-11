@@ -125,6 +125,57 @@ const HINDSIGHT_MCP_TOOLS = [
 ];
 
 /**
+ * Pre-approved MCP tool names for the clerk management MCP server.
+ * Lets agents call clerk_agent_*, clerk_auth_status, clerk_memory_search
+ * etc. without prompting.
+ */
+const CLERK_MCP_TOOLS = [
+  "mcp__clerk",
+  "mcp__clerk__*",
+];
+
+/**
+ * Built-in Claude Code tools. When `tools.allow: [all]` is set in
+ * clerk.yaml, every one of these is pre-approved so the agent never
+ * blocks on a permission prompt at runtime.
+ *
+ * Claude Code does NOT accept a literal "all" or "*" in permissions.allow,
+ * which is why we have to enumerate. defaultMode: acceptEdits is also set
+ * as a backstop, but it only auto-accepts file edits — Bash/Read/Write/
+ * WebFetch all still prompt unless explicitly listed.
+ */
+/** Stable de-duplication preserving first-seen order. */
+function dedupe<T>(items: T[]): T[] {
+  const seen = new Set<T>();
+  const out: T[] = [];
+  for (const item of items) {
+    if (seen.has(item)) continue;
+    seen.add(item);
+    out.push(item);
+  }
+  return out;
+}
+
+const ALL_BUILTIN_TOOLS = [
+  "Bash",
+  "BashOutput",
+  "KillBash",
+  "Read",
+  "Write",
+  "Edit",
+  "MultiEdit",
+  "NotebookEdit",
+  "Glob",
+  "Grep",
+  "WebFetch",
+  "WebSearch",
+  "TodoWrite",
+  "Task",
+  "Agent",
+  "ExitPlanMode",
+];
+
+/**
  * Attempt to locate the clerk CLI binary. Used to populate CLERK_CLI_PATH
  * in the .mcp.json env for the clerk-telegram MCP server. Falls back to
  * the literal string "clerk" if `which clerk` is unavailable.
@@ -196,15 +247,16 @@ export function scaffoldAgent(
   const rawAllow = tools.allow ?? [];
   const hasAllWildcard = rawAllow.includes("all");
   const baseAllow = hasAllWildcard
-    ? []
+    ? ALL_BUILTIN_TOOLS
     : rawAllow.filter((t) => t !== "all");
   const memoryBackend = clerkConfig?.memory?.backend;
   const hindsightEnabled = memoryBackend === "hindsight";
-  const permissionAllow = [
+  const permissionAllow = dedupe([
     ...baseAllow,
     ...(agentConfig.use_clerk_plugin === true ? CLERK_TELEGRAM_MCP_TOOLS : []),
     ...(hindsightEnabled ? HINDSIGHT_MCP_TOOLS : []),
-  ];
+    ...CLERK_MCP_TOOLS,
+  ]);
 
   // Build the template rendering context
   const context: Record<string, unknown> = {
@@ -466,15 +518,16 @@ export function reconcileAgent(
   const rawAllow = tools.allow ?? [];
   const hasAllWildcard = rawAllow.includes("all");
   const baseAllow = hasAllWildcard
-    ? []
+    ? ALL_BUILTIN_TOOLS
     : rawAllow.filter((t) => t !== "all");
   const memoryBackend = clerkConfig.memory?.backend;
   const hindsightEnabled = memoryBackend === "hindsight";
-  const desiredAllow = [
+  const desiredAllow = dedupe([
     ...baseAllow,
     ...(agentConfig.use_clerk_plugin === true ? CLERK_TELEGRAM_MCP_TOOLS : []),
     ...(hindsightEnabled ? HINDSIGHT_MCP_TOOLS : []),
-  ];
+    ...CLERK_MCP_TOOLS,
+  ]);
   const desiredDeny = tools.deny ?? [];
 
   // --- Reconcile settings.json ---

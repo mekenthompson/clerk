@@ -1,8 +1,9 @@
 import type { Command } from "commander";
 import chalk from "chalk";
 import { resolve } from "node:path";
-import { rmSync, existsSync } from "node:fs";
-import { resolveAgentsDir } from "../config/loader.js";
+import { rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import YAML from "yaml";
+import { resolveAgentsDir, loadConfig } from "../config/loader.js";
 import { withConfigError, getConfig, getConfigPath } from "./helpers.js";
 import { scaffoldAgent, reconcileAgent } from "../agents/scaffold.js";
 import {
@@ -373,6 +374,191 @@ export function registerAgentCommand(program: Command): void {
             );
           }
         }
+      })
+    );
+
+  // clerk agent grant <name> <tool>
+  agent
+    .command("grant <name> <tool>")
+    .description(
+      "Add a tool name (or 'all') to an agent's tools.allow in clerk.yaml, then reconcile"
+    )
+    .option("--no-restart", "Skip restarting the agent after granting")
+    .action(
+      withConfigError(async (name: string, tool: string, opts: { restart?: boolean }) => {
+        const configPath = getConfigPath(program);
+        if (!existsSync(configPath)) {
+          console.error(chalk.red(`clerk.yaml not found at ${configPath}`));
+          process.exit(1);
+        }
+
+        // Mutate the YAML in place, preserving comments where possible
+        const raw = readFileSync(configPath, "utf-8");
+        const doc = YAML.parseDocument(raw);
+        const agents = doc.get("agents") as YAML.YAMLMap | null;
+        if (!agents || !agents.has(name)) {
+          console.error(chalk.red(`Agent "${name}" is not defined in clerk.yaml`));
+          process.exit(1);
+        }
+        const agentNode = agents.get(name) as YAML.YAMLMap;
+
+        let tools = agentNode.get("tools") as YAML.YAMLMap | null;
+        if (!tools) {
+          tools = new YAML.YAMLMap();
+          agentNode.set("tools", tools);
+        }
+        let allow = tools.get("allow") as YAML.YAMLSeq | null;
+        if (!allow) {
+          allow = new YAML.YAMLSeq();
+          tools.set("allow", allow);
+        }
+        const existingAllow = (allow.toJSON() as string[]) ?? [];
+        if (existingAllow.includes(tool)) {
+          console.log(chalk.gray(`  ${name}: ${tool} already allowed`));
+        } else {
+          allow.add(tool);
+          writeFileSync(configPath, doc.toString(), "utf-8");
+          console.log(chalk.green(`  ${name}: granted ${tool}`));
+        }
+
+        // Reload + reconcile
+        const config = loadConfig(configPath);
+        const agentsDir = resolveAgentsDir(config);
+        const result = reconcileAgent(
+          name,
+          config.agents[name],
+          agentsDir,
+          config.telegram,
+          config,
+          configPath,
+        );
+        if (result.changes.length > 0) {
+          console.log(chalk.green(`  ${name}: reconciled (${result.changes.length} file(s))`));
+          if (opts.restart !== false) {
+            try {
+              restartAgent(name);
+              console.log(chalk.green(`  ${name}: restarted`));
+            } catch (err) {
+              console.error(chalk.red(`  ${name}: restart failed: ${(err as Error).message}`));
+            }
+          }
+        } else {
+          console.log(chalk.gray(`  ${name}: already in sync`));
+        }
+      })
+    );
+
+  // clerk agent dangerous <name>
+  agent
+    .command("dangerous <name>")
+    .description(
+      "Enable full tool access for an agent (sets tools.allow: [all] in clerk.yaml). Reconciles + restarts."
+    )
+    .option("--off", "Disable: clear tools.allow")
+    .option("--no-restart", "Skip restarting the agent")
+    .action(
+      withConfigError(async (name: string, opts: { off?: boolean; restart?: boolean }) => {
+        const configPath = getConfigPath(program);
+        if (!existsSync(configPath)) {
+          console.error(chalk.red(`clerk.yaml not found at ${configPath}`));
+          process.exit(1);
+        }
+
+        const raw = readFileSync(configPath, "utf-8");
+        const doc = YAML.parseDocument(raw);
+        const agents = doc.get("agents") as YAML.YAMLMap | null;
+        if (!agents || !agents.has(name)) {
+          console.error(chalk.red(`Agent "${name}" is not defined in clerk.yaml`));
+          process.exit(1);
+        }
+        const agentNode = agents.get(name) as YAML.YAMLMap;
+
+        if (opts.off) {
+          const tools = agentNode.get("tools") as YAML.YAMLMap | null;
+          if (tools && tools.has("allow")) {
+            tools.set("allow", new YAML.YAMLSeq());
+            writeFileSync(configPath, doc.toString(), "utf-8");
+            console.log(chalk.yellow(`  ${name}: dangerous mode OFF (tools.allow cleared)`));
+          } else {
+            console.log(chalk.gray(`  ${name}: dangerous mode was already off`));
+          }
+        } else {
+          let tools = agentNode.get("tools") as YAML.YAMLMap | null;
+          if (!tools) {
+            tools = new YAML.YAMLMap();
+            agentNode.set("tools", tools);
+          }
+          const allowSeq = new YAML.YAMLSeq();
+          allowSeq.add("all");
+          tools.set("allow", allowSeq);
+          writeFileSync(configPath, doc.toString(), "utf-8");
+          console.log(chalk.red(`  ${name}: dangerous mode ON — every built-in tool pre-approved`));
+          console.log(chalk.gray(`    (tools.allow: [all] expands to Bash, Read, Write, Edit, WebFetch, ...)`));
+        }
+
+        // Reload + reconcile
+        const config = loadConfig(configPath);
+        const agentsDir = resolveAgentsDir(config);
+        const result = reconcileAgent(
+          name,
+          config.agents[name],
+          agentsDir,
+          config.telegram,
+          config,
+          configPath,
+        );
+        if (result.changes.length > 0) {
+          console.log(chalk.green(`  ${name}: reconciled (${result.changes.length} file(s))`));
+          if (opts.restart !== false) {
+            try {
+              restartAgent(name);
+              console.log(chalk.green(`  ${name}: restarted`));
+            } catch (err) {
+              console.error(chalk.red(`  ${name}: restart failed: ${(err as Error).message}`));
+            }
+          }
+        } else {
+          console.log(chalk.gray(`  ${name}: already in sync`));
+        }
+      })
+    );
+
+  // clerk agent permissions <name>
+  agent
+    .command("permissions <name>")
+    .description("Show the current permissions.allow list for an agent")
+    .action(
+      withConfigError(async (name: string) => {
+        const config = getConfig(program);
+        const agentsDir = resolveAgentsDir(config);
+        const settingsPath = resolve(
+          agentsDir,
+          name,
+          ".claude",
+          "settings.json",
+        );
+        if (!existsSync(settingsPath)) {
+          console.error(
+            chalk.red(`Agent "${name}" not found at ${settingsPath}`)
+          );
+          process.exit(1);
+        }
+        const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+        const allow: string[] = settings.permissions?.allow ?? [];
+        const deny: string[] = settings.permissions?.deny ?? [];
+        const defaultMode: string | undefined = settings.permissions?.defaultMode;
+
+        console.log(chalk.bold(`\nPermissions for ${name}\n`));
+        if (defaultMode) {
+          console.log(chalk.cyan(`  defaultMode: ${defaultMode}`));
+        }
+        console.log(chalk.bold(`\n  allow (${allow.length})`));
+        for (const t of allow) console.log(chalk.green(`    + ${t}`));
+        if (deny.length > 0) {
+          console.log(chalk.bold(`\n  deny (${deny.length})`));
+          for (const t of deny) console.log(chalk.red(`    - ${t}`));
+        }
+        console.log();
       })
     );
 
