@@ -156,8 +156,13 @@ export function markdownToHtml(text: string): string {
   // Links: [text](url)
   result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>')
 
-  // File references: wrap filename.ext patterns in <code> tags
-  result = result.replace(/(?<![<\/\w])(\b[\w][\w.-]*\.(?:ts|js|py|rs|go|json|yaml|yml|toml|md|txt|sh|bash|zsh|css|html|xml|sql|env|cfg|conf|ini|log|csv|tsx|jsx|vue|svelte|rb|java|kt|swift|c|cpp|h|hpp|zig|asm|wasm|lock|mod|sum)\b)(?![^<]*>)/g, '<code>$1</code>')
+  // File references: wrap filename.ext patterns in <code> tags.
+  // Lookbehind excludes `>` so we don't double-wrap filenames that are
+  // already inside a restored inline-code placeholder like
+  // `<code>settings.json</code>`. Without this, the regex matched the
+  // filename character immediately after the `>` of the opening <code>
+  // tag and re-wrapped it, producing `<code><code>settings.json</code></code>`.
+  result = result.replace(/(?<![<\/\w>])(\b[\w][\w.-]*\.(?:ts|js|py|rs|go|json|yaml|yml|toml|md|txt|sh|bash|zsh|css|html|xml|sql|env|cfg|conf|ini|log|csv|tsx|jsx|vue|svelte|rb|java|kt|swift|c|cpp|h|hpp|zig|asm|wasm|lock|mod|sum)\b)(?![^<]*>)/g, '<code>$1</code>')
 
   // Restore preserved Telegram HTML tags (must run last so the file-ref
   // regex above doesn't accidentally match characters inside our placeholders).
@@ -168,6 +173,45 @@ export function markdownToHtml(text: string): string {
 
 export function escapeHtml(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+/**
+ * Repair LLM-side JSON escape bungles.
+ *
+ * Some MCP clients (and some LLM tool-call generators) occasionally emit a
+ * tool-argument string whose whitespace has been double-escaped — real
+ * newlines become the two-character sequence `\n`, tabs become `\t`, etc.
+ * The message then ships to Telegram intact and the user sees literal
+ * `\n\n` in the chat instead of paragraph breaks.
+ *
+ * Heuristic: if the text contains ZERO real newlines AND has at least one
+ * literal `\n`, `\r`, or `\t` escape sequence, the caller almost certainly
+ * intended those as real whitespace and the client serializer ate them.
+ * Unescape them (also `\\` and `\"`). If the text has any real newline,
+ * trust the caller exactly as given and do nothing — legitimate content
+ * may contain a literal `\n` inside a shell snippet or regex.
+ *
+ * This is intentionally narrow: it only fires on the clear bug signature
+ * (multi-line-looking content collapsed to one physical line). False
+ * positives on a single-line message that legitimately contains `\n` are
+ * possible but rare — users writing single-line shell snippets typically
+ * wrap them in backticks, and this runs before markdown→HTML so the
+ * unescape has no effect on text inside fenced code blocks if it already
+ * has real newlines around them.
+ */
+export function repairEscapedWhitespace(text: string): string {
+  if (text.includes('\n') || text.includes('\r')) return text
+  if (!/\\[nrt"\\]/.test(text)) return text
+  // Order matters: protect existing `\\` first so `\\n` stays as `\n`
+  // literal and doesn't become a newline.
+  const BACKSLASH_PH = '\x00BKSL\x00'
+  return text
+    .replace(/\\\\/g, BACKSLASH_PH)
+    .replace(/\\n/g, '\n')
+    .replace(/\\r/g, '\r')
+    .replace(/\\t/g, '\t')
+    .replace(/\\"/g, '"')
+    .replace(new RegExp(BACKSLASH_PH, 'g'), '\\')
 }
 
 // ---------------------------------------------------------------------------

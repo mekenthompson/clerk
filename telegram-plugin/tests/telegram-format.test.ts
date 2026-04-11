@@ -6,7 +6,7 @@ import { describe, test, expect } from 'vitest'
 
 // Import from the side-effect-free format module so tests don't trigger
 // server.ts's startup (env load, token check, grammy init).
-import { markdownToHtml, splitHtmlChunks, isLikelyTelegramHtml } from '../format.js'
+import { markdownToHtml, splitHtmlChunks, isLikelyTelegramHtml, repairEscapedWhitespace } from '../format.js'
 
 // ---------------------------------------------------------------------------
 // markdownToHtml
@@ -85,6 +85,49 @@ describe('markdownToHtml', () => {
     const matches = result.match(/<code>server\.ts<\/code>/g)
     expect(matches).not.toBeNull()
     expect(matches!.length).toBe(1)
+    // And crucially: NO nested <code><code>...</code></code>
+    expect(result).not.toContain('<code><code>')
+    expect(result).not.toContain('</code></code>')
+  })
+
+  test('does not double-wrap when inline code sits alongside prose with file refs', () => {
+    // Regression for the user-observed bug: messages that mixed inline code
+    // spans (backticks around filenames) with prose produced
+    // `<code><code>settings.json</code></code>` in the stored history. The
+    // file-reference regex ran AFTER inline-code placeholder restoration and
+    // re-wrapped the filename inside the just-restored <code> tag because
+    // its negative lookbehind did not exclude `>`.
+    const result = markdownToHtml(
+      'I mixed raw `<a href="...">` HTML into messages whose `format` defaults ' +
+      'to `html` — but the plugin runs a markdown→HTML converter which escapes ' +
+      'literal `<` and `>`, so raw tags render as visible text in the rendered ' +
+      '`settings.json` output.'
+    )
+    expect(result).not.toContain('<code><code>')
+    expect(result).not.toContain('</code></code>')
+    // settings.json, format, html should each appear inside exactly one
+    // <code> tag — either from the backtick wrapping or the file-ref regex,
+    // but never both.
+    const settingsMatches = result.match(/<code>settings\.json<\/code>/g)
+    expect(settingsMatches).not.toBeNull()
+    expect(settingsMatches!.length).toBe(1)
+  })
+
+  test('file-reference wrap still runs on bare filenames in prose', () => {
+    // Confirm the fix doesn't break the normal case: bare filenames in
+    // plain prose still get auto-wrapped in <code> tags.
+    const result = markdownToHtml('Edit server.ts and then run tsc --noEmit')
+    expect(result).toContain('<code>server.ts</code>')
+  })
+
+  test('file-reference wrap does not match filenames adjacent to > (inside tag markup)', () => {
+    // A filename that sits right after a `>` (tag close) should not be
+    // re-wrapped — it's already inside some structured context.
+    const input = '<b>foo.ts</b>'
+    const result = markdownToHtml(input)
+    // Passes through as Telegram HTML (smart pass-through) — filename is
+    // not wrapped in <code> because it's inside a <b>.
+    expect(result).toBe(input)
   })
 
   test('handles nested bold and italic', () => {
@@ -474,5 +517,80 @@ describe('coalescing logic', () => {
     const messages = ['Line 1\nLine 2', 'Line 3']
     const combined = messages.join('\n')
     expect(combined).toBe('Line 1\nLine 2\nLine 3')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// repairEscapedWhitespace — defends against LLM-side JSON escape bungles
+// where real newlines come through as the literal two-char sequence `\n`.
+// ---------------------------------------------------------------------------
+
+describe('repairEscapedWhitespace', () => {
+  test('unescapes literal \\n when text has no real newlines', () => {
+    const input = 'Line one\\nLine two\\nLine three'
+    expect(repairEscapedWhitespace(input)).toBe('Line one\nLine two\nLine three')
+  })
+
+  test('unescapes literal \\n\\n paragraph breaks', () => {
+    const input = 'Paragraph one.\\n\\nParagraph two.'
+    expect(repairEscapedWhitespace(input)).toBe('Paragraph one.\n\nParagraph two.')
+  })
+
+  test('handles the exact observed bug: html tags mixed with literal \\n', () => {
+    // Reproduces the actual stream_reply failure: a model produced a message
+    // with <b>/<code> tags and literal `\n` escape sequences instead of real
+    // newlines, and Telegram rendered the `\n` as visible characters.
+    const input = 'Audit done:\\n\\n<b>README.md</b>\\n• Missing <code>clerk update</code>\\n• Missing <code>clerk agent grant</code>'
+    const repaired = repairEscapedWhitespace(input)
+    expect(repaired).toBe('Audit done:\n\n<b>README.md</b>\n• Missing <code>clerk update</code>\n• Missing <code>clerk agent grant</code>')
+    // And the repaired text should still be recognized as Telegram HTML
+    // so the markdownToHtml pass-through works correctly.
+    expect(isLikelyTelegramHtml(repaired)).toBe(true)
+  })
+
+  test('leaves text alone when it already contains real newlines', () => {
+    // If the caller provided real newlines, we trust them completely and
+    // don't touch literal `\n` that may appear inside their content (e.g.
+    // a regex or shell snippet).
+    const input = 'Real newline here\nand a literal \\n in a regex example'
+    expect(repairEscapedWhitespace(input)).toBe(input)
+  })
+
+  test('leaves single-line text alone when it has no escape sequences', () => {
+    const input = 'Just a plain single-line message.'
+    expect(repairEscapedWhitespace(input)).toBe(input)
+  })
+
+  test('unescapes \\t and \\r as well', () => {
+    const input = 'Col1\\tCol2\\tCol3'
+    expect(repairEscapedWhitespace(input)).toBe('Col1\tCol2\tCol3')
+  })
+
+  test('unescapes \\" (quote) when present alongside \\n', () => {
+    const input = 'Say \\"hello\\"\\nnext line'
+    expect(repairEscapedWhitespace(input)).toBe('Say "hello"\nnext line')
+  })
+
+  test('preserves literal backslash sequences via \\\\', () => {
+    // `\\n` in the source is `\\` followed by `n`, which means the user
+    // literally wanted a backslash followed by the letter n, NOT a newline.
+    // Our order-aware unescape must protect `\\` before touching `\n`.
+    const input = 'Windows path: C:\\\\temp\\\\file.txt\\nnext line'
+    const out = repairEscapedWhitespace(input)
+    expect(out).toBe('Windows path: C:\\temp\\file.txt\nnext line')
+  })
+
+  test('end-to-end with markdownToHtml: repaired text renders correctly', () => {
+    // Full pipeline: broken input → repair → markdownToHtml → Telegram HTML.
+    const broken = '**Bold line**\\n\\n- bullet one\\n- bullet two'
+    const repaired = repairEscapedWhitespace(broken)
+    const html = markdownToHtml(repaired)
+    expect(html).toContain('<b>Bold line</b>')
+    // Real newlines should be present in the HTML output (Telegram renders
+    // them as actual line breaks in HTML parse mode).
+    expect(html).toContain('\n\n')
+    expect(html).toContain('- bullet one')
+    // Literal \n must not survive anywhere.
+    expect(html).not.toContain('\\n')
   })
 })

@@ -287,6 +287,29 @@ export function recordEdit(args: RecordEditArgs): void {
     .run(args.text, args.chat_id, args.message_id)
 }
 
+export interface DeleteFromHistoryArgs {
+  chat_id: string
+  message_id: number
+}
+
+/**
+ * Remove a single row from the local history buffer. Called after a
+ * successful `bot.api.deleteMessage` so the `get_recent_messages` tool
+ * reflects the deletion. Best-effort: callers should catch errors and
+ * log them rather than failing the deletion request.
+ *
+ * Telegram message_ids are unique within a chat regardless of thread, so
+ * we match on (chat_id, message_id) and ignore thread.
+ */
+export function deleteFromHistory(args: DeleteFromHistoryArgs): void {
+  requireDb()
+    .prepare(`
+      DELETE FROM messages
+       WHERE chat_id = ? AND message_id = ?
+    `)
+    .run(args.chat_id, args.message_id)
+}
+
 /**
  * Fetch recent messages for a chat (or chat+thread).
  *

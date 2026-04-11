@@ -41,7 +41,7 @@ import { StatusReactionController } from './status-reactions.js'
 import { createDraftStream, type DraftStreamHandle } from './draft-stream.js'
 import { startSessionTail, type SessionEvent, type SessionTailHandle } from './session-tail.js'
 import { startPtyTail, type PtyTailHandle } from './pty-tail.js'
-import { initHistory, recordInbound, recordOutbound, recordEdit, query as queryHistory } from './history.js'
+import { initHistory, recordInbound, recordOutbound, recordEdit, deleteFromHistory, query as queryHistory } from './history.js'
 
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'telegram')
 const ACCESS_FILE = join(STATE_DIR, 'access.json')
@@ -135,6 +135,21 @@ const activeDraftStreams = new Map<string, DraftStreamHandle>()
 function streamKey(chatId: string, threadId?: number): string {
   return `${chatId}:${threadId ?? '_'}`
 }
+
+/**
+ * Chats whose PTY-driven preview stream is currently being claimed by an
+ * in-flight `reply` tool handler. While a chat is in this set,
+ * `handlePtyPartial` drops any further PTY extractions so the preview
+ * message can't fight the real reply landing.
+ *
+ * Without this lockout, a race existed: the reply tool handler would
+ * finalize the existing draft stream and send the canonical text via a
+ * fresh sendMessage, but PTY-tail's `onPartial` callback could fire one
+ * last time between the `finalize()` call and the actual sendMessage,
+ * create a *new* draft stream, and post another preview message — the
+ * user-visible "duplicate message with leaked JSON" bug.
+ */
+const suppressPtyPreview = new Set<string>()
 
 if (!TOKEN) {
   process.stderr.write(
@@ -537,7 +552,7 @@ export {
   splitHtmlChunks,
   escapeHtml,
 } from './format.js'
-import { markdownToHtml, splitHtmlChunks, escapeHtml } from './format.js'
+import { markdownToHtml, splitHtmlChunks, escapeHtml, repairEscapedWhitespace } from './format.js'
 
 type AttachmentMeta = {
   kind: string
@@ -670,7 +685,7 @@ const mcp = new Server(
       '',
       'Messages from Telegram arrive as <channel source="telegram" chat_id="..." message_id="..." user="..." ts="...">. If the tag has an image_path attribute, Read that file — it is a photo the sender attached. If the tag has attachment_file_id, call download_attachment with that file_id to fetch the file, then Read the returned path. Reply with the reply tool — pass chat_id back. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply, omit reply_to for normal responses.',
       '',
-      'reply accepts file paths (files: ["/abs/path.png"]) for attachments. Use react to add emoji reactions, and edit_message for interim progress updates. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings. Use send_typing to show a typing indicator during long operations. Use pin_message to pin important outputs. Use forward_message to quote/resurface earlier messages.',
+      'reply accepts file paths (files: ["/abs/path.png"]) for attachments. Use react to add emoji reactions, edit_message for interim progress updates, and delete_message when you need to truly remove a message (prefer edit_message if you just want to change text — delete is for retraction). Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings. Use send_typing to show a typing indicator during long operations. Use pin_message to pin important outputs. Use forward_message to quote/resurface earlier messages.',
       '',
       'If a message includes message_thread_id, it came from a forum topic. The reply tool will automatically route replies back to the same topic — no need to pass message_thread_id manually unless you want to override.',
       '',
@@ -846,6 +861,19 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: 'delete_message',
+      description:
+        'Delete a message the bot previously sent. Use when you need to replace a message cleanly instead of leaving an edited stub behind (Telegram only allows bots to delete their own messages, and only within 48 hours for regular messages). Prefer edit_message if you just want to update text — delete_message is for true removal.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          chat_id: { type: 'string' },
+          message_id: { type: 'string' },
+        },
+        required: ['chat_id', 'message_id'],
+      },
+    },
+    {
       name: 'forward_message',
       description: 'Forward an existing message to a chat. Useful for quoting or resurfacing earlier messages. Preserves the original sender attribution. In forum topics, the forwarded message lands in the correct thread.',
       inputSchema: {
@@ -903,7 +931,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
     switch (req.params.name) {
       case 'reply': {
         const chat_id = args.chat_id as string
-        const text = args.text as string
+        const text = repairEscapedWhitespace(args.text as string)
         const reply_to = args.reply_to != null ? Number(args.reply_to) : undefined
         const files = (args.files as string[] | undefined) ?? []
         const access = loadAccess()
@@ -948,6 +976,63 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           : chunk(effectiveText, limit, access.chunkMode ?? 'length')
         const sentIds: number[] = []
 
+        // ─── Draft-stream handoff (OpenClaw-style edit-in-place) ──────────
+        //
+        // If PTY tail has already posted a preview message for this chat,
+        // `previewMessageId` captures its message_id and this handler claims
+        // it: the first text chunk below is delivered via `editMessageText`
+        // against that existing message instead of a fresh `sendMessage`.
+        // The user sees one message transition from the in-progress preview
+        // to the canonical reply, not two messages with a stale duplicate.
+        //
+        // When `reply_to` is set, Telegram cannot attach a quote-reference
+        // to an existing message via editMessageText. We fall back to
+        // DELETING the preview and sending fresh so the user gets their
+        // threaded quote. When editing fails for any other reason (preview
+        // was externally deleted, content identical, etc.) we also delete
+        // the stale preview before sending fresh.
+        //
+        // `suppressPtyPreview` is set FIRST, before touching the stream or
+        // the lastPtyPreviewByChat map. That closes the race where PTY
+        // tail fires between `activeDraftStreams.delete` and the lockout,
+        // sees no active stream, and creates a fresh preview behind us.
+        const replySKey = streamKey(chat_id, threadId)
+        suppressPtyPreview.add(replySKey)
+        let previewMessageId: number | null = null
+        const openStream = activeDraftStreams.get(replySKey)
+        if (openStream && !openStream.isFinal()) {
+          // Drops any pending PTY-fed update the draft stream was holding,
+          // waits for the in-flight edit to land, then locks further writes.
+          // We read getMessageId AFTER finalize resolves because the very
+          // first send may still have been in flight when we got here —
+          // reading before finalize would race and hand back null for a
+          // message that is about to exist.
+          await openStream.finalize().catch(() => { /* best effort */ })
+          previewMessageId = openStream.getMessageId()
+          activeDraftStreams.delete(replySKey)
+          lastPtyPreviewByChat.delete(replySKey)
+        }
+
+        const deleteStalePreview = async (id: number): Promise<void> => {
+          try {
+            await bot.api.deleteMessage(chat_id, id)
+          } catch (err) {
+            // Best-effort. Leaving a stale preview is worse than nothing,
+            // but we can't block the real reply on it. Log and move on.
+            process.stderr.write(
+              `telegram channel: failed to delete stale preview ${id}: ${(err as Error).message}\n`,
+            )
+          }
+        }
+
+        // If the caller wants a quoted reply, edit-in-place won't carry
+        // the quote. Drop the preview up front and take the normal send
+        // path so chunk[0] gets `reply_parameters` attached.
+        if (previewMessageId != null && reply_to != null && replyMode !== 'off') {
+          await deleteStalePreview(previewMessageId)
+          previewMessageId = null
+        }
+
         // Start typing indicator loop
         startTypingLoop(chat_id)
 
@@ -963,6 +1048,43 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
               ...(threadId != null ? { message_thread_id: threadId } : {}),
               ...(disableLinkPreview ? { link_preview_options: { is_disabled: true } } : {}),
             }
+
+            // Chunk 0 edit-in-place path: edit the existing preview
+            // message instead of sending a new one. editMessageText does
+            // NOT accept reply_parameters, so this branch only runs when
+            // reply_to is unset (the block above already dropped the
+            // preview otherwise).
+            if (i === 0 && previewMessageId != null) {
+              const editOpts: Record<string, unknown> = {}
+              if (parseMode) editOpts.parse_mode = parseMode
+              if (disableLinkPreview) editOpts.link_preview_options = { is_disabled: true }
+              try {
+                await robustApiCall(
+                  () => bot.api.editMessageText(chat_id, previewMessageId!, chunks[i], editOpts),
+                  { threadId, chat_id },
+                )
+                sentIds.push(previewMessageId!)
+                previewMessageId = null
+                continue
+              } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err)
+                // "message is not modified" → the preview already matches
+                // chunk[0] exactly. Treat as success and keep the id.
+                if (/not modified/i.test(msg)) {
+                  sentIds.push(previewMessageId!)
+                  previewMessageId = null
+                  continue
+                }
+                // Any other edit failure: delete the stale preview and
+                // fall through to the normal send path for chunk[0].
+                process.stderr.write(
+                  `telegram channel: preview edit-in-place failed (${msg}), deleting stale preview and sending fresh\n`,
+                )
+                await deleteStalePreview(previewMessageId!)
+                previewMessageId = null
+              }
+            }
+
             try {
               const sent = await robustApiCall(
                 () => bot.api.sendMessage(chat_id, chunks[i], sendOpts),
@@ -989,6 +1111,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           )
         } finally {
           stopTypingLoop(chat_id)
+          suppressPtyPreview.delete(replySKey)
         }
 
         // Files go as separate messages (Telegram doesn't mix text+file in one
@@ -1057,21 +1180,17 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         // the user's inbound message gets the 👍 terminal emoji.
         endStatusReaction(chat_id, threadId, 'done')
 
-        // If a draft stream is still open for this chat/thread, finalize it
-        // silently. The reply tool is the canonical "done" signal even if
-        // the model forgot to call stream_reply with done=true.
-        const sKey = streamKey(chat_id, threadId)
-        const openStream = activeDraftStreams.get(sKey)
-        if (openStream && !openStream.isFinal()) {
-          await openStream.finalize().catch(() => {})
-          activeDraftStreams.delete(sKey)
-        }
+        // Note: draft-stream claim happens at the START of this handler
+        // (see the "Draft-stream handoff" block above), so no post-send
+        // finalize is needed here. That early claim is what lets chunk[0]
+        // edit-in-place onto the existing preview message instead of
+        // leaving a stale duplicate in the chat.
 
         return { content: [{ type: 'text', text: result }] }
       }
       case 'stream_reply': {
         const chat_id = args.chat_id as string
-        const text = args.text as string
+        const text = repairEscapedWhitespace(args.text as string)
         const done = Boolean(args.done)
         const access = loadAccess()
         const configParseMode = access.parseMode ?? 'html'
@@ -1197,17 +1316,18 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const editAccess = loadAccess()
         const editConfigMode = editAccess.parseMode ?? 'html'
         const editFormat = (args.format as string | undefined) ?? editConfigMode
+        const editRawText = repairEscapedWhitespace(args.text as string)
         let editParseMode: 'HTML' | 'MarkdownV2' | undefined
         let editText: string
         if (editFormat === 'html') {
           editParseMode = 'HTML' as const
-          editText = markdownToHtml(args.text as string)
+          editText = markdownToHtml(editRawText)
         } else if (editFormat === 'markdownv2') {
           editParseMode = 'MarkdownV2' as const
-          editText = escapeMarkdownV2(args.text as string)
+          editText = escapeMarkdownV2(editRawText)
         } else {
           editParseMode = undefined
-          editText = args.text as string
+          editText = editRawText
         }
         const edited = await robustApiCall(
           () => bot.api.editMessageText(
@@ -1253,6 +1373,28 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         assertAllowedChat(args.chat_id as string)
         await bot.api.pinChatMessage(args.chat_id as string, Number(args.message_id))
         return { content: [{ type: 'text', text: `pinned message ${args.message_id}` }] }
+      }
+      case 'delete_message': {
+        const delChatId = args.chat_id as string
+        const delMessageId = Number(args.message_id)
+        assertAllowedChat(delChatId)
+        await robustApiCall(
+          () => bot.api.deleteMessage(delChatId, delMessageId),
+          { chat_id: delChatId },
+        )
+        // Remove the row from the local history buffer so get_recent_messages
+        // reflects the deletion. Best-effort: a history failure must not
+        // block the actual Telegram delete, which already succeeded.
+        if (HISTORY_ENABLED) {
+          try {
+            deleteFromHistory({ chat_id: delChatId, message_id: delMessageId })
+          } catch (err) {
+            process.stderr.write(
+              `telegram channel: history deleteFromHistory failed: ${err}\n`,
+            )
+          }
+        }
+        return { content: [{ type: 'text', text: `deleted message ${delMessageId}` }] }
       }
       case 'get_recent_messages': {
         if (!HISTORY_ENABLED) {
@@ -1480,6 +1622,11 @@ function handlePtyPartial(text: string): void {
   const chatId = currentSessionChatId
   const threadId = currentSessionThreadId
   const sKey = streamKey(chatId, threadId)
+
+  // Reply tool handler has claimed this chat's preview stream for an
+  // in-flight canonical send. Drop PTY extractions so we don't fight the
+  // reply or create a second message mid-handoff.
+  if (suppressPtyPreview.has(sKey)) return
 
   // Ignore previews that match what we already showed (avoids redundant
   // edits when the extractor re-fires on a still-frame buffer).
@@ -2044,36 +2191,28 @@ bot.command('agents', async ctx => {
   })
 })
 
-// /clerkstart <name> — start an agent (use clerkstart to avoid conflict with Telegram's built-in /start)
+// /clerkstart [name] — start an agent. Defaults to the current agent
+// (the one this bot is bound to) so the common case is just `/clerkstart`.
+// (use clerkstart to avoid conflict with Telegram's built-in /start)
 bot.command('clerkstart', async ctx => {
   if (!isAuthorizedSender(ctx)) return
-  const name = ctx.match?.trim()
-  if (!name) {
-    await clerkReply(ctx, 'Usage: /clerkstart <agent-name>')
-    return
-  }
+  const name = ctx.match?.trim() || getMyAgentName()
   await runClerkCommand(ctx, ['agent', 'start', name], `start ${name}`)
 })
 
-// /stop <name> — stop an agent
+// /stop [name] — stop an agent. Defaults to the current agent.
 bot.command('stop', async ctx => {
   if (!isAuthorizedSender(ctx)) return
-  const name = ctx.match?.trim()
-  if (!name) {
-    await clerkReply(ctx, 'Usage: /stop <agent-name>')
-    return
-  }
+  const name = ctx.match?.trim() || getMyAgentName()
   await runClerkCommand(ctx, ['agent', 'stop', name], `stop ${name}`)
 })
 
-// /restart <name> — restart an agent (supports "all")
+// /restart [name|all] — restart an agent. Defaults to the current agent
+// (one bot per agent ⇒ "restart" almost always means "restart me").
+// Pass an explicit name or "all" to override.
 bot.command('restart', async ctx => {
   if (!isAuthorizedSender(ctx)) return
-  const name = ctx.match?.trim()
-  if (!name) {
-    await clerkReply(ctx, 'Usage: /restart <agent-name|all>')
-    return
-  }
+  const name = ctx.match?.trim() || getMyAgentName()
   // Self-restart: the systemctl restart cascades into killing our own
   // process. execFileSync would die mid-call and report "command failed"
   // even though the restart actually succeeds. Ack first, fire-and-
@@ -2120,16 +2259,25 @@ bot.command('topics', async ctx => {
   await runClerkCommand(ctx, ['topics', 'list'], 'topics list')
 })
 
-// /logs <name> [lines] — show agent logs
+// /logs [name] [lines] — show agent logs.
+// Defaults to the current agent. With one numeric arg, treats it as the
+// line count for the current agent: `/logs 50`.
 bot.command('logs', async ctx => {
   if (!isAuthorizedSender(ctx)) return
-  const parts = (ctx.match ?? '').trim().split(/\s+/)
-  const name = parts[0]
-  if (!name) {
-    await clerkReply(ctx, 'Usage: /logs <agent-name> [lines]')
-    return
+  const parts = (ctx.match ?? '').trim().split(/\s+/).filter(Boolean)
+  let name: string
+  let linesArg: string | undefined
+  if (parts.length === 0) {
+    name = getMyAgentName()
+  } else if (parts.length === 1 && /^\d+$/.test(parts[0])) {
+    // Single numeric arg → line count for current agent
+    name = getMyAgentName()
+    linesArg = parts[0]
+  } else {
+    name = parts[0]
+    linesArg = parts[1]
   }
-  const lines = parts[1] ? parseInt(parts[1], 10) : 20
+  const lines = linesArg ? parseInt(linesArg, 10) : 20
   const lineCount = isNaN(lines) || lines < 1 ? 20 : Math.min(lines, 200)
   await runClerkCommand(ctx, ['agent', 'logs', name, '--lines', String(lineCount)], `logs ${name}`)
 })
@@ -2179,10 +2327,11 @@ bot.command('doctor', async ctx => {
   }
 })
 
-// /reconcile [name|all] — re-apply clerk.yaml to existing agents
+// /reconcile [name|all] — re-apply clerk.yaml to an agent.
+// Defaults to the current agent; pass "all" to reconcile every agent.
 bot.command('reconcile', async ctx => {
   if (!isAuthorizedSender(ctx)) return
-  const arg = (ctx.match ?? '').trim() || 'all'
+  const arg = (ctx.match ?? '').trim() || getMyAgentName()
   // Reconcile + --restart kills our own systemd unit when arg targets us.
   // Same self-kill problem as /restart — fire-and-forget the detached
   // child after acknowledging.
@@ -2202,26 +2351,22 @@ bot.command('reconcile', async ctx => {
   )
 })
 
-// /grant <agent> <tool> — add a tool permission to an agent and reconcile
-// (single-arg form: /grant <tool> applies to "assistant" if it's the only agent
-//  or to the first agent name in clerk.yaml — convenient for single-agent setups)
+// /grant <tool> [agent] — add a tool permission and reconcile.
+// Single-arg form `/grant <tool>` targets the current agent (one bot per
+// agent ⇒ that's almost always what you want). Two-arg form
+// `/grant <agent> <tool>` overrides the target.
 bot.command('grant', async ctx => {
   if (!isAuthorizedSender(ctx)) return
   const parts = (ctx.match ?? '').trim().split(/\s+/).filter(Boolean)
   if (parts.length === 0) {
-    await clerkReply(ctx, 'Usage: /grant <agent> <tool>  or  /grant <tool> (single-agent shortcut)')
+    await clerkReply(ctx, 'Usage: /grant <tool>  or  /grant <agent> <tool>')
     return
   }
   let agentName: string
   let tool: string
   if (parts.length === 1) {
-    // Single-arg shortcut: pick first agent from `clerk agent list --json`
-    const list = clerkExecJson<{ agents: Array<{ name: string }> }>(['agent', 'list'])
-    if (!list || list.agents.length === 0) {
-      await clerkReply(ctx, 'No agents defined in clerk.yaml')
-      return
-    }
-    agentName = list.agents[0].name
+    // Single-arg shortcut: target the current agent
+    agentName = getMyAgentName()
     tool = parts[0]
   } else {
     agentName = parts[0]
@@ -2234,19 +2379,20 @@ bot.command('grant', async ctx => {
   )
 })
 
-// /dangerous [agent] [off] — toggle full tool access
+// /dangerous [agent] [off] — toggle full tool access.
+// Defaults to the current agent. `/dangerous off` toggles off for the
+// current agent; `/dangerous <agent>` and `/dangerous <agent> off` override.
 bot.command('dangerous', async ctx => {
   if (!isAuthorizedSender(ctx)) return
   const parts = (ctx.match ?? '').trim().split(/\s+/).filter(Boolean)
   let agentName: string
   let off = false
   if (parts.length === 0) {
-    const list = clerkExecJson<{ agents: Array<{ name: string }> }>(['agent', 'list'])
-    if (!list || list.agents.length === 0) {
-      await clerkReply(ctx, 'No agents defined in clerk.yaml')
-      return
-    }
-    agentName = list.agents[0].name
+    agentName = getMyAgentName()
+  } else if (parts.length === 1 && parts[0] === 'off') {
+    // `/dangerous off` → toggle off on current agent
+    agentName = getMyAgentName()
+    off = true
   } else {
     agentName = parts[0]
     if (parts[1] === 'off') off = true
@@ -2256,18 +2402,11 @@ bot.command('dangerous', async ctx => {
   await runClerkCommand(ctx, args, `dangerous ${agentName}${off ? ' off' : ''}`)
 })
 
-// /permissions [agent] — show current allow list
+// /permissions [agent] — show current allow list.
+// Defaults to the current agent.
 bot.command('permissions', async ctx => {
   if (!isAuthorizedSender(ctx)) return
-  let agentName = (ctx.match ?? '').trim()
-  if (!agentName) {
-    const list = clerkExecJson<{ agents: Array<{ name: string }> }>(['agent', 'list'])
-    if (!list || list.agents.length === 0) {
-      await clerkReply(ctx, 'No agents defined in clerk.yaml')
-      return
-    }
-    agentName = list.agents[0].name
-  }
+  const agentName = (ctx.match ?? '').trim() || getMyAgentName()
   await runClerkCommand(ctx, ['agent', 'permissions', agentName], `permissions ${agentName}`)
 })
 
@@ -2292,30 +2431,34 @@ bot.command('update', async ctx => {
 // /clerkhelp — show all available bot commands
 bot.command('clerkhelp', async ctx => {
   if (!isAuthorizedSender(ctx)) return
+  const me = getMyAgentName()
   const helpText = [
     'Clerk Bot Commands',
+    '',
+    `This bot is bound to the ${me} agent. Commands default to ${me};`,
+    'pass an agent name to override.',
     '',
     'Status & lifecycle',
     '/agents - List all agents and their status',
     '/auth - Show auth/token status',
     '/topics - Show topic-to-agent mappings',
-    '/logs <name> [lines] - Show agent logs (default: 20)',
+    '/logs [name] [lines] - Show agent logs (default: current agent, 20 lines)',
     '/memory <query> - Search agent memory',
     '',
-    'Operate',
-    '/clerkstart <name> - Start an agent',
-    '/stop <name> - Stop an agent',
-    '/restart <name|all> - Restart an agent (or all)',
+    'Operate (default: current agent)',
+    '/clerkstart [name] - Start an agent',
+    '/stop [name] - Stop an agent',
+    '/restart [name|all] - Restart an agent (or all)',
     '',
     'Maintain',
     '/doctor - Health check (deps, vault, hindsight, services, MCP)',
-    '/reconcile [name|all] - Re-apply clerk.yaml to existing agents',
+    '/reconcile [name|all] - Re-apply clerk.yaml (default: current agent)',
     '/update - Pull latest, reinstall deps, reconcile, restart',
     '',
-    'Permissions',
+    'Permissions (default: current agent)',
     '/permissions [agent] - Show current allow/deny list',
-    '/grant [agent] <tool> - Grant a tool permission and reconcile',
-    '/dangerous [agent] [off] - Toggle full tool access (every built-in tool)',
+    '/grant <tool> | /grant <agent> <tool> - Grant a tool permission and reconcile',
+    '/dangerous [off] | /dangerous <agent> [off] - Toggle full tool access',
     '',
     '/clerkhelp - Show this help message',
     '',
@@ -2331,17 +2474,17 @@ async function registerClerkBotCommands(): Promise<void> {
     { command: 'agents', description: 'List all agents and their status' },
     { command: 'auth', description: 'Show auth/token status' },
     { command: 'topics', description: 'Show topic-to-agent mappings' },
-    { command: 'logs', description: 'Show agent logs' },
+    { command: 'logs', description: 'Show agent logs (default: this agent)' },
     { command: 'memory', description: 'Search agent memory' },
-    { command: 'clerkstart', description: 'Start an agent' },
-    { command: 'stop', description: 'Stop an agent' },
-    { command: 'restart', description: 'Restart an agent (or all)' },
+    { command: 'clerkstart', description: 'Start an agent (default: this agent)' },
+    { command: 'stop', description: 'Stop an agent (default: this agent)' },
+    { command: 'restart', description: 'Restart an agent (default: this agent)' },
     { command: 'doctor', description: 'Health check (deps, vault, services, MCP)' },
-    { command: 'reconcile', description: 'Re-apply clerk.yaml to existing agents' },
+    { command: 'reconcile', description: 'Re-apply clerk.yaml (default: this agent)' },
     { command: 'update', description: 'Pull latest, reinstall, reconcile, restart' },
-    { command: 'permissions', description: 'Show agent permissions' },
-    { command: 'grant', description: 'Grant a tool permission to an agent' },
-    { command: 'dangerous', description: 'Toggle full tool access for an agent' },
+    { command: 'permissions', description: 'Show agent permissions (default: this agent)' },
+    { command: 'grant', description: 'Grant a tool permission (default: this agent)' },
+    { command: 'dangerous', description: 'Toggle full tool access (default: this agent)' },
     { command: 'clerkhelp', description: 'Show all clerk bot commands' },
   ]
 
