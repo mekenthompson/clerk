@@ -36,7 +36,7 @@ import { randomBytes } from 'crypto'
 import { execFileSync, execSync, spawn } from 'child_process'
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync } from 'fs'
 import { homedir } from 'os'
-import { join, extname, sep, basename } from 'path'
+import { join, extname, sep, basename, dirname } from 'path'
 import { StatusReactionController } from './status-reactions.js'
 import { createDraftStream, type DraftStreamHandle } from './draft-stream.js'
 import { startSessionTail, type SessionEvent, type SessionTailHandle } from './session-tail.js'
@@ -1418,9 +1418,16 @@ const ptyTailEnabled = process.env.CLERK_PTY_TAIL !== 'off'
 let ptyTailHandle: PtyTailHandle | null = null
 if (ptyTailEnabled) {
   try {
-    // service.log lives next to the agent dir per src/agents/systemd.ts
+    // service.log lives in the agent root (one level above .claude),
+    // per src/agents/systemd.ts. The plugin's own process.cwd() is the
+    // telegram-plugin source dir, not the agent dir, so prefer deriving
+    // the agent dir from CLAUDE_CONFIG_DIR which Claude Code exports
+    // into every MCP server subprocess as <agent>/.claude.
+    const agentDir = process.env.CLAUDE_CONFIG_DIR
+      ? dirname(process.env.CLAUDE_CONFIG_DIR)
+      : process.cwd()
     const serviceLogPath = process.env.CLERK_SERVICE_LOG_PATH
-      ?? join(process.cwd(), 'service.log')
+      ?? join(agentDir, 'service.log')
     ptyTailHandle = startPtyTail({
       logFile: serviceLogPath,
       log: (msg) => process.stderr.write(`telegram channel: ${msg}\n`),
