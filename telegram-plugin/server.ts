@@ -514,9 +514,17 @@ const TELEGRAM_HTML_TAGS = new Set([
  * than markdown waiting to be converted?
  *
  * Returns true when ALL the tags we find are recognized Telegram HTML
- * tags AND there's at least one of them. This is conservative: if the
- * model wrote `<div>foo</div>` (not Telegram HTML), we treat it as
- * markdown and escape it. If the model wrote `<b>foo</b>`, we trust it.
+ * tags AND there's at least one of them AND the text doesn't also have
+ * markdown-only syntax (** for bold, [text](url) for links). This is
+ * conservative: if the model wrote `<div>foo</div>` (not Telegram HTML),
+ * we treat it as markdown and escape it. If the model wrote `<b>foo</b>`,
+ * we trust it.
+ *
+ * Critical: we strip markdown code spans and fenced code blocks BEFORE
+ * scanning for tags, because the model frequently writes things like
+ * `\`<b>tag</b>\`` (an inline code example showing literal HTML). Without
+ * the strip, the heuristic would see `<b>` inside the code span and
+ * misclassify the whole text as raw HTML.
  *
  * Why we need this: the model is told the reply tool's default format is
  * "html" and reasonably writes things like `<b>Header</b>`. But our
@@ -524,8 +532,20 @@ const TELEGRAM_HTML_TAGS = new Set([
  * the model's HTML into literal text in the message.
  */
 export function isLikelyTelegramHtml(text: string): boolean {
-  // Find all opening tag names
-  const tagMatches = text.matchAll(/<\/?([a-z][a-z0-9-]*)\b[^>]*>/gi)
+  // Strip fenced code blocks first (greedy, cross-line)
+  let scanText = text.replace(/```[\s\S]*?```/g, '')
+  // Then strip inline code spans (single backticks, no newlines)
+  scanText = scanText.replace(/`[^`\n]+`/g, '')
+
+  // If the stripped text contains markdown-only syntax (e.g. **bold**,
+  // [text](url), or markdown headings), the caller is writing markdown
+  // even if they ALSO sprinkled some <b> tags in. Treat as markdown.
+  if (/\*\*[^\n*]+\*\*/.test(scanText)) return false
+  if (/\[[^\]]+\]\([^)]+\)/.test(scanText)) return false
+  if (/^#{1,6}\s+/m.test(scanText)) return false
+
+  // Now count remaining HTML tags
+  const tagMatches = scanText.matchAll(/<\/?([a-z][a-z0-9-]*)\b[^>]*>/gi)
   let count = 0
   for (const m of tagMatches) {
     const tag = m[1].toLowerCase()

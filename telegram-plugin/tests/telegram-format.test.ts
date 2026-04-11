@@ -198,6 +198,57 @@ describe('isLikelyTelegramHtml', () => {
   test('returns false for code with angle brackets', () => {
     expect(isLikelyTelegramHtml('the operator <-> means something')).toBe(false)
   })
+
+  // ─── The bug: HTML tags inside markdown inline code spans ─────────────
+
+  test('ignores HTML tags inside backtick inline code', () => {
+    // The model writes `<b>tag</b>` (showing literal HTML in inline code).
+    // The text is markdown, NOT raw HTML — must return false.
+    expect(isLikelyTelegramHtml('Use `<b>tag</b>` to make text bold.')).toBe(false)
+  })
+
+  test('ignores HTML tags inside fenced code blocks', () => {
+    const input = 'Example:\n```html\n<div>hi</div>\n```\nThat\'s it.'
+    expect(isLikelyTelegramHtml(input)).toBe(false)
+  })
+
+  test('returns false when text mixes markdown bold with HTML examples in code', () => {
+    // The exact bug pattern from the user-facing screenshot regression
+    const input = '**1. Raw HTML rendering** — replies showed `<b>tag</b>` text instead of bold.'
+    expect(isLikelyTelegramHtml(input)).toBe(false)
+  })
+
+  test('returns false when text has markdown links', () => {
+    expect(isLikelyTelegramHtml('See [docs](https://example.com)')).toBe(false)
+  })
+
+  test('returns false when text has markdown headings', () => {
+    expect(isLikelyTelegramHtml('## Section\n\nbody')).toBe(false)
+  })
+
+  test('still returns true for pure HTML even with code spans', () => {
+    // Code spans can coexist with real HTML — as long as there are NO
+    // markdown bold/link/heading patterns and the tags outside code are
+    // all valid Telegram HTML, trust it.
+    expect(isLikelyTelegramHtml('<b>commit</b> <code>abc123</code>')).toBe(true)
+  })
+})
+
+describe('markdownToHtml regression: HTML in code spans', () => {
+  test('renders **bold** correctly when text also contains `<b>` in inline code', () => {
+    const input = '**1. Raw HTML rendering** — replies showed `<b>tag</b>` text instead of bold.'
+    const out = markdownToHtml(input)
+    expect(out).toContain('<b>1. Raw HTML rendering</b>')
+    expect(out).toContain('<code>&lt;b&gt;tag&lt;/b&gt;</code>')
+    expect(out).not.toContain('**1. Raw HTML rendering**')
+  })
+
+  test('renders fenced code blocks even when they contain HTML examples', () => {
+    const input = 'Example:\n```html\n<div>hi</div>\n```'
+    const out = markdownToHtml(input)
+    expect(out).toContain('<pre><code class="language-html">')
+    expect(out).toContain('&lt;div&gt;hi&lt;/div&gt;')
+  })
 })
 
 // ---------------------------------------------------------------------------
