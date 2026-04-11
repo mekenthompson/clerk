@@ -87,11 +87,22 @@ export interface MessageRegionExtractor {
  * v1 extractor for Claude Code 2.1.x.
  *
  * Heuristic: scan the buffer from the bottom for the most recent line
- * that starts with `● clerk-telegram - reply (MCP)` or
+ * that contains `● clerk-telegram - reply (MCP)` or
  * `● clerk-telegram - stream_reply (MCP)`. Once found, locate the
- * `text: "` literal and extract everything between the opening quote and
- * the next unescaped closing `"`, handling line wraps where Ink
- * indents the continuation.
+ * `text: "` literal and extract the value using an escape-aware
+ * character walk that terminates at the first UNESCAPED closing `"`.
+ *
+ * This matters because the model frequently passes `text` as a
+ * non-final parameter (e.g. `chat_id: "123", text: "hello", reply_to: "456"`).
+ * Earlier versions of this extractor looked for the `")` close-paren
+ * sequence, which terminated at the END of the whole tool call rather
+ * than the end of the text string — causing everything after the real
+ * `text` value (e.g. `, reply_to: "456"`) to leak into the "extracted"
+ * preview and ultimately surface as a garbled duplicate Telegram message.
+ *
+ * The walk also handles Claude Code's JSON escapes (`\"`, `\n`, `\t`,
+ * `\\`) so a text value that contains literal quotes renders correctly
+ * in the preview instead of truncating at the first inner quote.
  *
  * Falls back to scanning for any `● clerk-telegram - reply` substring
  * even if it's not the very first character of the line — Ink sometimes
@@ -157,17 +168,36 @@ export class V1Extractor implements MessageRegionExtractor {
     if (textIdx < 0) return null
     const afterOpen = textIdx + 'text: "'.length
 
-    // Extract until closing `"` — but the rendered TUI doesn't escape
-    // backslashes, so we just grab until we see a `")` (close paren-
-    // close-quote sequence) or run out of buffer. The tool call always
-    // ends with `")` because reply takes named params and text is one of them.
-    let extracted: string
-    const closeIdx = joined.indexOf('")', afterOpen)
-    if (closeIdx >= 0) {
-      extracted = joined.substring(afterOpen, closeIdx)
-    } else {
-      // Open-ended — model is still generating. Take everything to end.
-      extracted = joined.substring(afterOpen)
+    // Escape-aware string walk. Starting right after the opening quote
+    // of the text parameter, consume characters one at a time. A `\`
+    // byte escapes the next char (`\"` → `"`, `\n` → newline, `\\` →
+    // backslash, and any unknown sequence is preserved verbatim). An
+    // UNESCAPED `"` terminates the string — this is the real end of
+    // the text parameter value, regardless of whether it's followed by
+    // `)` (text was last) or `,` (text was followed by another param).
+    // If we exhaust the buffer without finding the terminator, the
+    // model is mid-stream and we return everything captured so far.
+    let extracted = ''
+    let pos = afterOpen
+    while (pos < joined.length) {
+      const ch = joined[pos]
+      if (ch === '\\' && pos + 1 < joined.length) {
+        const next = joined[pos + 1]
+        if (next === '"') extracted += '"'
+        else if (next === 'n') extracted += '\n'
+        else if (next === 't') extracted += '\t'
+        else if (next === 'r') extracted += '\r'
+        else if (next === '\\') extracted += '\\'
+        else extracted += '\\' + next
+        pos += 2
+        continue
+      }
+      if (ch === '"') {
+        // Unescaped closing quote — end of the text parameter value.
+        break
+      }
+      extracted += ch
+      pos++
     }
 
     // Strip Ink's continuation-line indentation. Each non-first line

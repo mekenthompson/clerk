@@ -158,6 +158,99 @@ describe('V1Extractor', () => {
   it('has a stable version identifier for logging', () => {
     expect(extractor.version).toMatch(/^v1/)
   })
+
+  // ─── Regression: text is NOT the last parameter ─────────────────────────
+  //
+  // The user-visible "duplicate Telegram message with leaked JSON" bug
+  // came from V1Extractor assuming `text` was always the final param in
+  // the tool call and terminating on the `")` close-paren sequence. When
+  // the model passed `text` before `reply_to` / `format` / etc., the
+  // extractor grabbed everything from `text: "` to the end-of-call `")`,
+  // including `", reply_to: "86"` in the middle — which then got edited
+  // into a draft-stream preview and surfaced as a second Telegram message
+  // whose body contained literal JSON.
+
+  it('extracts text correctly when it is NOT the last parameter', async () => {
+    const tui = '● clerk-telegram - reply (MCP)(chat_id: "123", text: "Hello", reply_to: "86")\r\n'
+    const term = await feedToTerm(tui)
+    expect(extractor.extract(term)).toBe('Hello')
+  })
+
+  it('extracts text when followed by multiple trailing params', async () => {
+    const tui =
+      '● clerk-telegram - reply (MCP)(chat_id: "123", text: "Done now", reply_to: "86", format: "text")\r\n'
+    const term = await feedToTerm(tui)
+    expect(extractor.extract(term)).toBe('Done now')
+  })
+
+  it('handles escaped double quotes inside text without early termination', async () => {
+    const tui =
+      '● clerk-telegram - reply (MCP)(chat_id: "123", text: "Understood — I\\"ll stop the duplicate \\"progress stream + final reply\\" pattern", reply_to: "86")\r\n'
+    // Widen the terminal so the long single line doesn't get hard-wrapped
+    // by xterm at the default 132 cols — which would truncate the trailing
+    // characters and look like a regression even though the parser is
+    // fine.
+    const term = await feedToTerm(tui, { cols: 400 })
+    const result = extractor.extract(term)
+    // Inner escaped quotes should appear as real quotes in the extracted
+    // text. The terminator is the unescaped `"` after `pattern`.
+    expect(result).toBe(
+      'Understood — I"ll stop the duplicate "progress stream + final reply" pattern',
+    )
+    // And crucially: no `reply_to` leakage.
+    expect(result).not.toContain('reply_to')
+    expect(result).not.toContain('"86"')
+  })
+
+  it('handles escaped backslashes correctly', async () => {
+    const tui =
+      '● clerk-telegram - reply (MCP)(chat_id: "123", text: "Windows path: C:\\\\temp\\\\file.txt", reply_to: "1")\r\n'
+    const term = await feedToTerm(tui)
+    const result = extractor.extract(term)
+    expect(result).toBe('Windows path: C:\\temp\\file.txt')
+    expect(result).not.toContain('reply_to')
+  })
+
+  it('handles escaped newline sequences inside text', async () => {
+    const tui =
+      '● clerk-telegram - reply (MCP)(chat_id: "123", text: "Line one\\nLine two", reply_to: "1")\r\n'
+    const term = await feedToTerm(tui)
+    const result = extractor.extract(term)
+    // The continuation-line collapse turns the unescaped \n into a space.
+    expect(result).toMatch(/^Line one\s+Line two$/)
+    expect(result).not.toContain('reply_to')
+  })
+
+  it('does not include subsequent param names when text is mid-call', async () => {
+    // This is the exact scenario that produced the bug screenshot.
+    const tui =
+      '● clerk-telegram - reply (MCP)(chat_id: "8248703757", text: "Short answer coming once I\\"ve looked.", reply_to: "86")\r\n'
+    const term = await feedToTerm(tui)
+    const result = extractor.extract(term)
+    expect(result).toBe('Short answer coming once I"ve looked.')
+    expect(result).not.toMatch(/reply_to/)
+    expect(result).not.toMatch(/"86"/)
+  })
+
+  it('still handles the open-ended mid-stream case with text NOT last', async () => {
+    // Partial render: text parameter has started but the closing quote
+    // hasn't arrived yet. The extractor should return what it has so far.
+    const tui =
+      '● clerk-telegram - reply (MCP)(chat_id: "123", text: "Halfway through a thou'
+    const term = await feedToTerm(tui)
+    const result = extractor.extract(term)
+    expect(result).toBe('Halfway through a thou')
+  })
+
+  it('stops at first unescaped closing quote even if more text follows', async () => {
+    // Only the FIRST unescaped `"` terminates the string. Anything after
+    // is a different param (or the tool-call close paren).
+    const tui = '● clerk-telegram - reply (MCP)(chat_id: "1", text: "First", text: "Second")\r\n'
+    const term = await feedToTerm(tui)
+    // Extractor should latch onto the FIRST `text: "` and return its value
+    // cleanly, NOT merge the two values.
+    expect(extractor.extract(term)).toBe('First')
+  })
 })
 
 describe('V1Extractor against real captured production output', () => {
