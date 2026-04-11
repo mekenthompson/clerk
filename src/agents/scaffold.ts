@@ -405,12 +405,17 @@ export function scaffoldAgent(
         settings.mcpServers[clerkMcpEntry.key] = clerkMcpEntry.value;
       }
 
-      // Hindsight auto-recall hook (UserPromptSubmit)
+      // Hindsight auto-recall hook (UserPromptSubmit). Claude Code's
+      // schema is { matcher, hooks: [{type, command}] } per settings —
+      // each entry is a matcher group, not a flat command list.
       const hookInstall = installAutoRecallHook(name, agentDir, clerkConfig);
       if (hookInstall) {
         settings.hooks = settings.hooks ?? {};
         settings.hooks.UserPromptSubmit = [
-          { type: "command", command: hookInstall.hookCommand },
+          {
+            matcher: "",
+            hooks: [{ type: "command", command: hookInstall.hookCommand }],
+          },
         ];
       }
 
@@ -653,17 +658,28 @@ export function reconcileAgent(
 
     // Hindsight auto-recall hook (UserPromptSubmit). Always re-install
     // so script updates from `clerk update` propagate.
+    //
+    // Schema (per Claude Code): each top-level entry is a matcher group:
+    //   [{ matcher: "...", hooks: [{ type: "command", command: "..." }] }]
+    // The matcher is a string — for UserPromptSubmit it's ignored, but
+    // an empty string or omission means "match all".
     const hookInstall = installAutoRecallHook(name, agentDir, clerkConfig);
     if (hookInstall) {
       settings.hooks = settings.hooks ?? {};
       settings.hooks.UserPromptSubmit = [
-        { type: "command", command: hookInstall.hookCommand },
+        {
+          matcher: "",
+          hooks: [{ type: "command", command: hookInstall.hookCommand }],
+        },
       ];
     } else if (settings.hooks?.UserPromptSubmit) {
       // Memory backend was disabled — clean up the hook entry but
-      // preserve other UserPromptSubmit hooks the user may have added.
-      const filtered = (settings.hooks.UserPromptSubmit as Array<{ command?: string }>)
-        .filter((h) => !(h.command ?? "").includes("auto-recall.sh"));
+      // preserve other UserPromptSubmit groups the user may have added.
+      const filtered = (settings.hooks.UserPromptSubmit as Array<{
+        hooks?: Array<{ command?: string }>
+      }>).filter((group) =>
+        !(group.hooks ?? []).some((h) => (h.command ?? "").includes("auto-recall.sh"))
+      );
       if (filtered.length === 0) {
         delete settings.hooks.UserPromptSubmit;
         if (Object.keys(settings.hooks).length === 0) delete settings.hooks;

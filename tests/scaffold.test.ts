@@ -700,7 +700,11 @@ describe("scaffoldAgent installs the auto-recall hook in settings.json", () => {
     );
     expect(settings.hooks?.UserPromptSubmit).toBeDefined();
     expect(settings.hooks.UserPromptSubmit).toHaveLength(1);
-    const hook = settings.hooks.UserPromptSubmit[0];
+    // Schema: each entry is a matcher group with a nested hooks array
+    const group = settings.hooks.UserPromptSubmit[0];
+    expect(group.matcher).toBe("");
+    expect(group.hooks).toHaveLength(1);
+    const hook = group.hooks[0];
     expect(hook.type).toBe("command");
     expect(hook.command).toContain("auto-recall.sh");
     expect(hook.command).toContain("CLERK_HINDSIGHT_BANK=general");
