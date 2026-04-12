@@ -976,6 +976,47 @@ export function scaffoldAgent(
     0o600,
   );
 
+  // --- Sub-agent definitions (.claude/agents/<name>.md) ---
+  //
+  // Render each sub-agent from the merged `subagents:` config into a
+  // Claude Code custom sub-agent markdown file. These are project-scope
+  // agents (`.claude/agents/`) so they're specific to this agent's
+  // working directory and don't leak into other agents or the user's
+  // global `~/.claude/agents/`.
+  if (agentConfig.subagents) {
+    const agentsDir = join(agentDir, ".claude", "agents");
+    mkdirSync(agentsDir, { recursive: true });
+    for (const [saName, saDef] of Object.entries(agentConfig.subagents)) {
+      const mdPath = join(agentsDir, `${saName}.md`);
+      const frontmatter: Record<string, unknown> = {
+        name: saName,
+        description: saDef.description,
+      };
+      if (saDef.model) frontmatter.model = saDef.model;
+      if (saDef.background != null) frontmatter.background = saDef.background;
+      if (saDef.isolation) frontmatter.isolation = saDef.isolation;
+      if (saDef.tools) frontmatter.tools = saDef.tools.join(", ");
+      if (saDef.disallowedTools) frontmatter.disallowedTools = saDef.disallowedTools.join(", ");
+      if (saDef.maxTurns) frontmatter.maxTurns = saDef.maxTurns;
+      if (saDef.permissionMode) frontmatter.permissionMode = saDef.permissionMode;
+      if (saDef.effort) frontmatter.effort = saDef.effort;
+      if (saDef.color) frontmatter.color = saDef.color;
+      if (saDef.memory) frontmatter.memory = saDef.memory;
+      if (saDef.skills && saDef.skills.length > 0) {
+        frontmatter.skills = saDef.skills;
+      }
+      const fmLines = Object.entries(frontmatter)
+        .map(([k, v]) => {
+          if (Array.isArray(v)) return `${k}:\n${v.map(i => `  - ${i}`).join("\n")}`;
+          return `${k}: ${v}`;
+        })
+        .join("\n");
+      const body = saDef.prompt ?? `You are the ${saName} sub-agent.`;
+      const content = `---\n${fmLines}\n---\n\n${body}\n`;
+      writeFileSync(mdPath, content, "utf-8");
+    }
+  }
+
   // --- Session greeting script ---
   //
   // Pre-rendered shell script that sends the agent's config summary to
@@ -1289,6 +1330,48 @@ export function reconcileAgent(
       };
     } else {
       settings.hooks = { SessionStart: clerkSessionStart };
+    }
+
+    // --- Reconcile sub-agent definitions (.claude/agents/<name>.md) ---
+    //
+    // Same generation as scaffold — overwrites on every reconcile so
+    // config changes propagate. Sub-agent files are fully clerk-owned.
+    if (agentConfig.subagents) {
+      const saDir = join(agentDir, ".claude", "agents");
+      mkdirSync(saDir, { recursive: true });
+      for (const [saName, saDef] of Object.entries(agentConfig.subagents)) {
+        const mdPath = join(saDir, `${saName}.md`);
+        const frontmatter: Record<string, unknown> = {
+          name: saName,
+          description: saDef.description,
+        };
+        if (saDef.model) frontmatter.model = saDef.model;
+        if (saDef.background != null) frontmatter.background = saDef.background;
+        if (saDef.isolation) frontmatter.isolation = saDef.isolation;
+        if (saDef.tools) frontmatter.tools = saDef.tools.join(", ");
+        if (saDef.disallowedTools) frontmatter.disallowedTools = saDef.disallowedTools.join(", ");
+        if (saDef.maxTurns) frontmatter.maxTurns = saDef.maxTurns;
+        if (saDef.permissionMode) frontmatter.permissionMode = saDef.permissionMode;
+        if (saDef.effort) frontmatter.effort = saDef.effort;
+        if (saDef.color) frontmatter.color = saDef.color;
+        if (saDef.memory) frontmatter.memory = saDef.memory;
+        if (saDef.skills && saDef.skills.length > 0) {
+          frontmatter.skills = saDef.skills;
+        }
+        const fmLines = Object.entries(frontmatter)
+          .map(([k, v]) => {
+            if (Array.isArray(v)) return `${k}:\n${v.map(i => `  - ${i}`).join("\n")}`;
+            return `${k}: ${v}`;
+          })
+          .join("\n");
+        const body = saDef.prompt ?? `You are the ${saName} sub-agent.`;
+        const content = `---\n${fmLines}\n---\n\n${body}\n`;
+        const before = existsSync(mdPath) ? readFileSync(mdPath, "utf-8") : "";
+        if (content !== before) {
+          writeFileSync(mdPath, content, "utf-8");
+          changes.push(mdPath);
+        }
+      }
     }
 
     // Regenerate the session-greeting script so config changes are

@@ -93,6 +93,70 @@ export const AgentHooksSchema = z
   .optional();
 
 /**
+ * A sub-agent definition that clerk renders into a
+ * `.claude/agents/<name>.md` file. Maps 1:1 onto Claude Code's
+ * custom sub-agent frontmatter spec (code.claude.com/docs/en/sub-agents).
+ *
+ * Only `description` is required here; `name` is derived from the
+ * YAML key in `subagents: { <name>: { ... } }`.
+ */
+export const SubagentSchema = z.object({
+  description: z
+    .string()
+    .describe("When the main agent should delegate to this sub-agent"),
+  model: z
+    .string()
+    .optional()
+    .describe("Model: 'sonnet', 'opus', 'haiku', full ID, or 'inherit' (default)"),
+  background: z
+    .boolean()
+    .optional()
+    .describe("Run in background by default (non-blocking). Default false"),
+  isolation: z
+    .enum(["worktree"])
+    .optional()
+    .describe("'worktree' gives the sub-agent its own git branch"),
+  tools: z
+    .array(z.string())
+    .optional()
+    .describe("Tool allowlist. Inherits all if omitted"),
+  disallowedTools: z
+    .array(z.string())
+    .optional()
+    .describe("Tools to deny (removed from inherited set)"),
+  maxTurns: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe("Max agentic turns before auto-stop"),
+  permissionMode: z
+    .enum(["default", "acceptEdits", "auto", "dontAsk", "bypassPermissions", "plan"])
+    .optional()
+    .describe("Permission mode override for this sub-agent"),
+  effort: z
+    .enum(["low", "medium", "high", "max"])
+    .optional()
+    .describe("Effort level override"),
+  color: z
+    .enum(["red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan"])
+    .optional()
+    .describe("Display color in the task list"),
+  memory: z
+    .enum(["user", "project", "local"])
+    .optional()
+    .describe("Persistent memory scope for cross-session learning"),
+  skills: z
+    .array(z.string())
+    .optional()
+    .describe("Skills to preload into the sub-agent's context"),
+  prompt: z
+    .string()
+    .optional()
+    .describe("System prompt (becomes the markdown body after frontmatter)"),
+});
+
+/**
  * Session lifecycle policy. Controls whether the agent resumes its
  * previous Claude Code session on restart or starts fresh.
  *
@@ -235,6 +299,10 @@ const profileFields = {
   env: z.record(z.string(), z.string()).optional(),
   system_prompt_append: z.string().optional(),
   skills: z.array(z.string()).optional(),
+  subagents: z
+    .record(z.string(), SubagentSchema)
+    .optional()
+    .describe("Named sub-agent definitions rendered to .claude/agents/<name>.md"),
   session: SessionSchema,
   channels: ChannelsSchema,
   dangerous_mode: z.boolean().optional(),
@@ -326,6 +394,14 @@ export const AgentSchema = z.object({
     .describe(
       "Names of skills from clerk.skills_dir to symlink into this " +
       "agent's skills/ directory. Unioned with defaults.skills.",
+    ),
+  subagents: z
+    .record(z.string(), SubagentSchema)
+    .optional()
+    .describe(
+      "Sub-agent definitions rendered to .claude/agents/<name>.md. " +
+      "Each sub-agent is a specialized worker the main agent can " +
+      "delegate to. Merged with defaults/profile sub-agents by name.",
     ),
   session: SessionSchema.describe(
     "Session lifecycle policy. Controls --continue vs fresh start on " +

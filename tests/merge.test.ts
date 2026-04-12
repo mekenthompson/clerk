@@ -244,6 +244,38 @@ describe("mergeAgentConfig skills pool", () => {
   });
 });
 
+describe("mergeAgentConfig subagents", () => {
+  it("per-key merges subagents with agent winning on name conflict", () => {
+    const defaults: AgentDefaults = {
+      subagents: {
+        worker: { description: "default worker", model: "sonnet" },
+        researcher: { description: "default researcher", model: "haiku" },
+      },
+    };
+    const agent = baseAgent({
+      subagents: {
+        worker: { description: "custom worker", model: "opus" },
+        reviewer: { description: "custom reviewer" },
+      },
+    });
+    const result = mergeAgentConfig(defaults, agent);
+    // Worker overridden by agent
+    expect(result.subagents?.worker?.model).toBe("opus");
+    // Researcher from defaults
+    expect(result.subagents?.researcher?.model).toBe("haiku");
+    // Reviewer from agent
+    expect(result.subagents?.reviewer?.description).toBe("custom reviewer");
+  });
+
+  it("flows defaults.subagents when agent has none", () => {
+    const result = mergeAgentConfig(
+      { subagents: { w: { description: "d" } } },
+      baseAgent(),
+    );
+    expect(result.subagents?.w?.description).toBe("d");
+  });
+});
+
 describe("mergeAgentConfig session policy", () => {
   it("shallow-merges session fields with agent winning", () => {
     const defaults: AgentDefaults = {

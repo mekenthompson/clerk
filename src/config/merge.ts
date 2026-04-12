@@ -299,6 +299,18 @@ export function mergeAgentConfig(
     };
   }
 
+  // --- subagents: per-key merge, agent wins on name conflict ---
+  //
+  // A default sub-agent "worker" can be overridden entirely by an
+  // agent-level "worker" definition. No field-level merge within a
+  // single sub-agent — if you override, you replace the whole def.
+  if (defaults.subagents || merged.subagents) {
+    merged.subagents = {
+      ...(defaults.subagents ?? {}),
+      ...(merged.subagents ?? {}),
+    };
+  }
+
   // --- session: shallow field merge, agent wins ---
   if (defaults.session || merged.session) {
     const base = defaults.session ?? {};
