@@ -322,6 +322,25 @@ export function deleteFromHistory(args: DeleteFromHistoryArgs): void {
  *   - explicit number → only that thread
  *   - explicit null → only the chat-root (non-thread) messages
  */
+/**
+ * Count outbound messages sent to a chat within the last `withinSeconds`.
+ * Used by the orphaned-reply backstop to detect if a reply tool handler
+ * already sent a message during the backstop's delay window, avoiding
+ * a duplicate send.
+ */
+export function getRecentOutboundCount(
+  chatId: string,
+  withinSeconds: number,
+): number {
+  const cutoff = Math.floor(Date.now() / 1000) - withinSeconds
+  const row = requireDb()
+    .prepare(
+      'SELECT COUNT(*) as cnt FROM messages WHERE chat_id = ? AND role = ? AND ts >= ?',
+    )
+    .get(chatId, 'assistant', cutoff) as { cnt: number } | undefined
+  return row?.cnt ?? 0
+}
+
 export function query(opts: QueryOptions): RecordedMessage[] {
   const limit = Math.min(MAX_LIMIT, Math.max(1, opts.limit ?? DEFAULT_LIMIT))
   const params: unknown[] = [opts.chat_id]

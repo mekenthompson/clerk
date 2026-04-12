@@ -8,6 +8,7 @@ import {
   recordOutbound,
   recordEdit,
   query,
+  getRecentOutboundCount,
   _resetForTests,
 } from '../history.js'
 
@@ -231,5 +232,40 @@ describe('retention sweep', () => {
     _resetForTests()
     initHistory(stateDir, 0)
     expect(query({ chat_id: '-100' })).toHaveLength(1)
+  })
+})
+
+describe('getRecentOutboundCount (backstop dedup helper)', () => {
+  it('counts assistant messages within the time window', () => {
+    initHistory(stateDir, 30)
+    const now = Math.floor(Date.now() / 1000)
+    recordOutbound({ chat_id: '-100', thread_id: null, message_ids: [10], texts: ['reply 1'], ts: now })
+    recordOutbound({ chat_id: '-100', thread_id: null, message_ids: [11], texts: ['reply 2'], ts: now - 1 })
+    // Message outside the 2-second window
+    recordOutbound({ chat_id: '-100', thread_id: null, message_ids: [9], texts: ['old reply'], ts: now - 5 })
+
+    expect(getRecentOutboundCount('-100', 2)).toBe(2)
+    expect(getRecentOutboundCount('-100', 10)).toBe(3)
+  })
+
+  it('returns 0 when no outbound messages exist', () => {
+    initHistory(stateDir, 30)
+    expect(getRecentOutboundCount('-100', 2)).toBe(0)
+  })
+
+  it('does not count inbound messages', () => {
+    initHistory(stateDir, 30)
+    const now = Math.floor(Date.now() / 1000)
+    recordInbound({ chat_id: '-100', thread_id: null, message_id: 10, user: 'u', user_id: '1', ts: now, text: 'user msg' })
+    expect(getRecentOutboundCount('-100', 2)).toBe(0)
+  })
+
+  it('scopes to the specified chat_id', () => {
+    initHistory(stateDir, 30)
+    const now = Math.floor(Date.now() / 1000)
+    recordOutbound({ chat_id: '-100', thread_id: null, message_ids: [10], texts: ['in chat -100'], ts: now })
+    recordOutbound({ chat_id: '-200', thread_id: null, message_ids: [11], texts: ['in chat -200'], ts: now })
+    expect(getRecentOutboundCount('-100', 2)).toBe(1)
+    expect(getRecentOutboundCount('-200', 2)).toBe(1)
   })
 })
