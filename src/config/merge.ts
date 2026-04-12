@@ -28,23 +28,17 @@
  * The function always returns a new AgentConfig; inputs are not mutated.
  */
 
-import type { AgentConfig, AgentDefaults, AgentHooks } from "./schema.js";
+import type { AgentConfig, AgentDefaults, AgentHooks, Profile } from "./schema.js";
 
 /**
  * Resolve whether an agent should load the forked clerk-telegram MCP.
- *
- * Two config paths both express this:
- *   - Legacy: `agents.x.use_clerk_plugin: true`
- *   - New:    `agents.x.channels.telegram.plugin: "clerk"`
- *
- * Either is accepted. The new form is preferred and documented as such
- * in the schema; the legacy boolean stays for backcompat so existing
- * clerk.yaml files keep working untouched.
+ * Reads `channels.telegram.plugin`:
+ *   - "clerk"    → load the fork via --dangerously-load-development-channels
+ *   - "official" → use the upstream marketplace plugin
+ *   - unset      → upstream marketplace plugin (default)
  */
 export function usesClerkTelegramPlugin(agent: AgentConfig): boolean {
-  if (agent.channels?.telegram?.plugin === "clerk") return true;
-  if (agent.channels?.telegram?.plugin === "official") return false;
-  return agent.use_clerk_plugin === true;
+  return agent.channels?.telegram?.plugin === "clerk";
 }
 
 /**
@@ -142,6 +136,53 @@ export function deepMergeJson(base: unknown, override: unknown): unknown {
   return out;
 }
 
+/**
+ * Full three-layer cascade: global `defaults:` → named profile (from
+ * `extends:`) → per-agent config. This is the public entry point that
+ * scaffold/reconcile call once at the top; every downstream read sees
+ * the merged result.
+ *
+ * Resolution:
+ *   1. If `agent.extends` is set and a matching profile exists in the
+ *      clerk.yaml `profiles:` map, stack it between defaults and the
+ *      agent (defaults → profile → agent order, each layer wins over
+ *      the one below it).
+ *   2. If `agent.extends` is set but no inline profile matches, the
+ *      name still drives filesystem profile resolution for rendering
+ *      assets (CLAUDE.md.hbs, skills/) in scaffold.ts. Missing inline
+ *      profiles are silent — not an error — because filesystem-only
+ *      profiles are the common case today.
+ *   3. If `agent.extends` is unset, only the defaults layer applies.
+ *
+ * Single-level extends only — profile-to-profile chains are not
+ * resolved. Add recursion here if that use case appears.
+ */
+export function resolveAgentConfig(
+  defaults: AgentDefaults | undefined,
+  profiles: Record<string, Profile> | undefined,
+  agent: AgentConfig,
+): AgentConfig {
+  const name = agent.extends;
+  const profile = name && profiles ? profiles[name] : undefined;
+
+  if (!profile) {
+    return mergeAgentConfig(defaults, agent);
+  }
+
+  // Treat the inline profile as a synthetic "agent" for the first
+  // merge step, then treat the result as "defaults" for the second.
+  // Runtime shapes are compatible — Profile is a superset of
+  // AgentDefaults (profiles can carry `extends:` themselves, although
+  // we don't chain resolution). Strip extends from the synthesized
+  // layer so it doesn't leak into the per-agent config.
+  const { extends: _unused, ...profileWithoutExtends } = profile;
+  const layered = mergeAgentConfig(
+    defaults,
+    profileWithoutExtends as unknown as AgentConfig,
+  );
+  return mergeAgentConfig(layered as unknown as AgentDefaults, agent);
+}
+
 export function mergeAgentConfig(
   defaults: AgentDefaults | undefined,
   agent: AgentConfig,
@@ -152,13 +193,8 @@ export function mergeAgentConfig(
 
   // --- Scalar fields: agent wins, defaults fill blanks ---
   //
-  // template is optional (no zod default) so that this cascade can
-  // distinguish "agent didn't specify" from "agent explicitly chose".
-  // If the merged result ends up undefined (neither side set it), the
-  // consumer falls back to DEFAULT_TEMPLATE — see scaffold.ts.
-  if (defaults.template !== undefined && merged.template === undefined) {
-    merged.template = defaults.template;
-  }
+  // `extends` is read only from the agent/profile — AgentDefaultsSchema
+  // does not carry it (defaults IS the bottom of the cascade).
   if (defaults.bot_token !== undefined && merged.bot_token === undefined) {
     merged.bot_token = defaults.bot_token;
   }
@@ -174,10 +210,6 @@ export function mergeAgentConfig(
   ) {
     merged.skip_permission_prompt = defaults.skip_permission_prompt;
   }
-  if (defaults.use_clerk_plugin !== undefined && merged.use_clerk_plugin === undefined) {
-    merged.use_clerk_plugin = defaults.use_clerk_plugin;
-  }
-
   // --- tools: union (dedup-preserving-order, defaults first) ---
   if (defaults.tools || merged.tools) {
     const dAllow = defaults.tools?.allow ?? [];

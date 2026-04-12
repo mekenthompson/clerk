@@ -68,7 +68,7 @@ export function installAllUnits(config: ClerkConfig): void {
 
   for (const agentName of Object.keys(config.agents)) {
     const agentDir = resolve(agentsDir, agentName);
-    const useAutoaccept = config.agents[agentName].use_clerk_plugin === true;
+    const useAutoaccept = config.agents[agentName].channels?.telegram?.plugin === "clerk";
     const content = generateUnit(agentName, agentDir, useAutoaccept);
     installUnit(agentName, content);
   }

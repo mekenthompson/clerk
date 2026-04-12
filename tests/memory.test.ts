@@ -91,7 +91,7 @@ describe("getCollectionForAgent", () => {
   it("returns explicit collection name from agent config", () => {
     const config = makeClerkConfig({
       coach: {
-        template: "default",
+        extends: "default",
         topic_name: "Coach",
         schedule: [],
         memory: { collection: "health-data", auto_recall: true, isolation: "default" },
@@ -104,7 +104,7 @@ describe("getCollectionForAgent", () => {
   it("defaults to agent name when no collection is specified", () => {
     const config = makeClerkConfig({
       coach: {
-        template: "default",
+        extends: "default",
         topic_name: "Coach",
         schedule: [],
       },
@@ -116,7 +116,7 @@ describe("getCollectionForAgent", () => {
   it("defaults to agent name when memory config is absent", () => {
     const config = makeClerkConfig({
       writer: {
-        template: "default",
+        extends: "default",
         topic_name: "Writer",
         schedule: [],
       },
@@ -130,7 +130,7 @@ describe("isStrictIsolation", () => {
   it("returns true for strict isolation", () => {
     const config = makeClerkConfig({
       journal: {
-        template: "default",
+        extends: "default",
         topic_name: "Journal",
         schedule: [],
         memory: { collection: "journal", auto_recall: true, isolation: "strict" },
@@ -143,7 +143,7 @@ describe("isStrictIsolation", () => {
   it("returns false for default isolation", () => {
     const config = makeClerkConfig({
       coach: {
-        template: "default",
+        extends: "default",
         topic_name: "Coach",
         schedule: [],
         memory: { collection: "coach", auto_recall: true, isolation: "default" },
@@ -156,7 +156,7 @@ describe("isStrictIsolation", () => {
   it("returns false when memory config is absent", () => {
     const config = makeClerkConfig({
       bot: {
-        template: "default",
+        extends: "default",
         topic_name: "Bot",
         schedule: [],
       },
@@ -170,19 +170,19 @@ describe("reflectAcrossAgents", () => {
   it("excludes strict agents from reflection", () => {
     const config = makeClerkConfig({
       coach: {
-        template: "default",
+        extends: "default",
         topic_name: "Coach",
         schedule: [],
         memory: { collection: "coach-data", auto_recall: true, isolation: "default" },
       },
       journal: {
-        template: "default",
+        extends: "default",
         topic_name: "Journal",
         schedule: [],
         memory: { collection: "journal-private", auto_recall: true, isolation: "strict" },
       },
       planner: {
-        template: "default",
+        extends: "default",
         topic_name: "Planner",
         schedule: [],
         memory: { collection: "planner", auto_recall: true, isolation: "default" },
@@ -206,7 +206,7 @@ describe("reflectAcrossAgents", () => {
   it("returns empty eligible when all agents are strict", () => {
     const config = makeClerkConfig({
       secret: {
-        template: "default",
+        extends: "default",
         topic_name: "Secret",
         schedule: [],
         memory: { collection: "secret", auto_recall: true, isolation: "strict" },

@@ -14,7 +14,7 @@ export interface AgentInfo {
   active: string;
   uptime: string | null;
   memory: string | null;
-  template: string;
+  extends: string;
   topic_name: string;
   topic_emoji?: string;
   auth: {
@@ -41,7 +41,7 @@ export function handleGetAgents(config: ClerkConfig): AgentInfo[] {
       active: status?.active ?? "unknown",
       uptime: status?.uptime ?? null,
       memory: status?.memory ?? null,
-      template: agentConfig.template ?? "default",
+      extends: agentConfig.extends ?? "default",
       topic_name: agentConfig.topic_name,
       topic_emoji: agentConfig.topic_emoji,
       auth: {

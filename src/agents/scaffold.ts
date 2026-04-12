@@ -13,19 +13,19 @@ import {
 import { execSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import type { AgentConfig, ClerkConfig, TelegramConfig } from "../config/schema.js";
-import { DEFAULT_TEMPLATE } from "../config/schema.js";
+import { DEFAULT_PROFILE } from "../config/schema.js";
 import {
-  mergeAgentConfig,
+  resolveAgentConfig,
   translateHooksToClaudeShape,
   usesClerkTelegramPlugin,
   deepMergeJson,
 } from "../config/merge.js";
 import {
-  getTemplatePath,
-  getBaseTemplatePath,
+  getProfilePath,
+  getBaseProfilePath,
   renderTemplate,
-  copySkills,
-} from "./templates.js";
+  copyProfileSkills,
+} from "./profiles.js";
 import { getHindsightSettingsEntry, getClerkMcpSettingsEntry } from "../memory/scaffold-integration.js";
 import type { McpServerConfig } from "../memory/hindsight.js";
 import { loadTopicState } from "../telegram/state.js";
@@ -446,17 +446,22 @@ export function scaffoldAgent(
   userIdOverride?: string,
   clerkConfigPath?: string,
 ): ScaffoldResult {
-  // Apply global defaults → per-agent cascade. When clerk.yaml has no
-  // `defaults:` block, the result is identical to agentConfigRaw, so
-  // existing behavior is preserved. See src/config/merge.ts.
-  const agentConfig = mergeAgentConfig(clerkConfig?.defaults, agentConfigRaw);
+  // Apply the full cascade: global defaults → inline profile (from
+  // `extends:`) → per-agent config. When clerk.yaml has no `defaults:`
+  // or `profiles:` and no `extends:` on the agent, the result is
+  // identical to agentConfigRaw so existing behavior is preserved.
+  const agentConfig = resolveAgentConfig(
+    clerkConfig?.defaults,
+    clerkConfig?.profiles,
+    agentConfigRaw,
+  );
 
   const agentDir = resolve(agentsDir, name);
   const created: string[] = [];
   const skipped: string[] = [];
 
-  const templatePath = getTemplatePath(agentConfig.template ?? DEFAULT_TEMPLATE);
-  const basePath = getBaseTemplatePath();
+  const profilePath = getProfilePath(agentConfig.extends ?? DEFAULT_PROFILE);
+  const basePath = getBaseProfilePath();
 
   // Load user config for Telegram user ID
   const userConfig = loadUserConfig();
@@ -724,7 +729,7 @@ export function scaffoldAgent(
   ];
 
   for (const { src, dest } of templateFiles) {
-    const srcPath = join(templatePath, src);
+    const srcPath = join(profilePath, src);
     if (existsSync(srcPath)) {
       writeIfMissing(
         join(agentDir, dest),
@@ -806,7 +811,7 @@ export function scaffoldAgent(
   );
 
   // --- Copy skill files from template ---
-  copySkills(templatePath, join(agentDir, "skills"));
+  copyProfileSkills(profilePath, join(agentDir, "skills"));
 
   // --- Symlink global skills from clerk.skills_dir ---
   //
@@ -876,9 +881,13 @@ export function reconcileAgent(
   clerkConfigPath?: string,
   options: ReconcileOptions = {},
 ): ReconcileResult {
-  // Apply global defaults → per-agent cascade (same semantics as
-  // scaffoldAgent). Every downstream read uses the merged config.
-  const agentConfig = mergeAgentConfig(clerkConfig.defaults, agentConfigRaw);
+  // Apply the full defaults → profile → agent cascade (same semantics
+  // as scaffoldAgent). Every downstream read uses the resolved config.
+  const agentConfig = resolveAgentConfig(
+    clerkConfig.defaults,
+    clerkConfig.profiles,
+    agentConfigRaw,
+  );
 
   const agentDir = resolve(agentsDir, name);
   const changes: string[] = [];
@@ -919,7 +928,7 @@ export function reconcileAgent(
   // --- Reconcile start.sh (purely template-driven, safe to overwrite) ---
   const startShPath = join(agentDir, "start.sh");
   if (existsSync(startShPath)) {
-    const basePath = getBaseTemplatePath();
+    const basePath = getBaseProfilePath();
     const startShContext: Record<string, unknown> = {
       name,
       agentDir,
@@ -958,8 +967,8 @@ export function reconcileAgent(
   // template fixes through (e.g., the {{memory}} → [object Object] bug
   // we shipped earlier). Same context as scaffold's CLAUDE.md render.
   if (options.forceClaudeMd) {
-    const templatePath = getTemplatePath(agentConfig.template ?? DEFAULT_TEMPLATE);
-    const claudeMdSrc = join(templatePath, "CLAUDE.md.hbs");
+    const profilePath = getProfilePath(agentConfig.extends ?? DEFAULT_PROFILE);
+    const claudeMdSrc = join(profilePath, "CLAUDE.md.hbs");
     const claudeMdDest = join(agentDir, "CLAUDE.md");
     if (existsSync(claudeMdSrc) && existsSync(claudeMdDest)) {
       const claudeContext: Record<string, unknown> = {

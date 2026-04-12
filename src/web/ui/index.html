@@ -301,7 +301,7 @@
             <div class="meta-item"><label>Status </label><span>${escapeHtml(a.active)}</span></div>
             <div class="meta-item"><label>Uptime </label><span>${formatUptime(a.uptime)}</span></div>
             <div class="meta-item"><label>Mem </label><span>${a.memory || '--'}</span></div>
-            <div class="meta-item"><label>Template </label><span>${escapeHtml(a.template)}</span></div>
+            <div class="meta-item"><label>Profile </label><span>${escapeHtml(a.extends)}</span></div>
             <div class="meta-item"><label>Auth </label><span>${a.auth.authenticated ? '✓' : '✗'}</span></div>
             <div class="meta-item"><label>Collection </label><span>${escapeHtml(a.memoryCollection)}</span></div>
           </div>

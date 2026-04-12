@@ -17,7 +17,7 @@ function makeConfig(agents: Record<string, { topic_name: string; topic_id?: numb
   const agentEntries: Record<string, any> = {};
   for (const [name, cfg] of Object.entries(agents)) {
     agentEntries[name] = {
-      template: "default",
+      extends: "default",
       topic_name: cfg.topic_name,
       topic_id: cfg.topic_id,
       tools: { allow: [], deny: [] },

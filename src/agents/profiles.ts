@@ -1,0 +1,99 @@
+import { readFileSync, existsSync, readdirSync, statSync, copyFileSync, mkdirSync } from "node:fs";
+import { resolve, join } from "node:path";
+import Handlebars from "handlebars";
+
+/**
+ * Root of the filesystem profiles directory (project-level). Each
+ * subdirectory is a named profile containing `CLAUDE.md.hbs`,
+ * optional `SOUL.md.hbs`, and an optional `skills/` subdir. The
+ * `_base/` sibling holds framework-level render templates
+ * (start.sh.hbs, settings.json.hbs) that every agent uses regardless
+ * of their `extends:` choice.
+ */
+const PROFILES_ROOT = resolve(import.meta.dirname, "../../profiles");
+
+/**
+ * Resolve the filesystem path for a named profile. Falls back to
+ * `default` if the requested profile directory doesn't exist. Rejects
+ * names that would escape PROFILES_ROOT via `..` or absolute paths.
+ */
+export function getProfilePath(profileName: string): string {
+  const requested = resolve(PROFILES_ROOT, profileName);
+  // Prevent path traversal — resolved path must stay within PROFILES_ROOT
+  if (requested !== PROFILES_ROOT && !requested.startsWith(PROFILES_ROOT + "/")) {
+    throw new Error(`Invalid profile name: ${profileName}`);
+  }
+  if (existsSync(requested) && hasProfileFiles(requested)) {
+    return requested;
+  }
+  const fallback = resolve(PROFILES_ROOT, "default");
+  if (existsSync(fallback)) {
+    return fallback;
+  }
+  throw new Error(`Profile not found: ${profileName} (searched ${PROFILES_ROOT})`);
+}
+
+function hasProfileFiles(dir: string): boolean {
+  try {
+    return readdirSync(dir).some((f) => f.endsWith(".hbs") || f === "skills");
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Path to the `_base/` profile directory. Contains framework-level
+ * render templates (start.sh.hbs, settings.json.hbs) that every
+ * agent uses regardless of their `extends:` choice. Hardcoded name,
+ * not user input, so no traversal check needed.
+ */
+export function getBaseProfilePath(): string {
+  return resolve(PROFILES_ROOT, "_base");
+}
+
+/** Read a .hbs file and render it with the given context. */
+export function renderTemplate(
+  templatePath: string,
+  context: Record<string, unknown>,
+): string {
+  const source = readFileSync(templatePath, "utf-8");
+  const template = Handlebars.compile(source);
+  return template(context);
+}
+
+/**
+ * Recursively copy files from a profile's `skills/` directory into
+ * the destination. Skips files that already exist at the destination
+ * (idempotent). Used for bundled profile skills; user-selected global
+ * skills come through a separate symlink path in scaffold.ts.
+ */
+export function copyProfileSkills(profilePath: string, destPath: string): void {
+  const skillsSrc = join(profilePath, "skills");
+  if (!existsSync(skillsSrc)) {
+    return;
+  }
+  copyDirRecursive(skillsSrc, destPath);
+}
+
+function copyDirRecursive(src: string, dest: string): void {
+  mkdirSync(dest, { recursive: true });
+  const entries = readdirSync(src);
+  for (const entry of entries) {
+    const srcPath = join(src, entry);
+    const destPath = join(dest, entry);
+    const stat = statSync(srcPath);
+    if (stat.isDirectory()) {
+      copyDirRecursive(srcPath, destPath);
+    } else {
+      // Idempotent: don't overwrite existing files
+      if (!existsSync(destPath)) {
+        copyFileSync(srcPath, destPath);
+      }
+    }
+  }
+}
+
+// Register a "json" helper for Handlebars to emit raw JSON
+Handlebars.registerHelper("json", (value: unknown) => {
+  return new Handlebars.SafeString(JSON.stringify(value, null, 2));
+});

@@ -17,7 +17,7 @@ describe("ClerkConfigSchema", () => {
       vault: { path: "~/.clerk/vault.enc" },
       agents: {
         "health-coach": {
-          template: "health-coach",
+          extends: "health-coach",
           topic_name: "Health",
           topic_emoji: "🏋️",
           soul: {
@@ -68,11 +68,11 @@ describe("ClerkConfigSchema", () => {
 
     const result = ClerkConfigSchema.parse(config);
     expect(result.clerk.agents_dir).toBe("~/.clerk/agents");
-    // template is now optional (no zod default) so the cascade in
-    // src/config/merge.ts can distinguish "unset" from "explicitly chose
-    // default". Consumers fall back to DEFAULT_TEMPLATE. See phase-1
-    // cleanup notes in config/schema.ts.
-    expect(result.agents.assistant.template).toBeUndefined();
+    // `extends` is optional (no zod default) so that the merge cascade
+    // in src/config/merge.ts can distinguish "unset" from "explicitly
+    // chose 'default'". Consumers fall back to DEFAULT_PROFILE when it
+    // remains unset after merging defaults → profile → agent.
+    expect(result.agents.assistant.extends).toBeUndefined();
     expect(result.agents.assistant.schedule).toEqual([]);
   });
 
@@ -102,7 +102,7 @@ describe("ClerkConfigSchema", () => {
       clerk: { version: 1 },
       telegram: { bot_token: "x", forum_chat_id: "y" },
       agents: {
-        test: { template: "default" },
+        test: { extends: "default" },
       },
     };
 
@@ -148,8 +148,8 @@ describe("ClerkConfigSchema", () => {
       clerk: { version: 1 },
       telegram: { bot_token: "x", forum_chat_id: "y" },
       agents: {
-        health: { topic_name: "Health", template: "health-coach" },
-        exec: { topic_name: "Executive", template: "executive-assistant" },
+        health: { topic_name: "Health", extends: "health-coach" },
+        exec: { topic_name: "Executive", extends: "executive-assistant" },
         general: { topic_name: "General" },
       },
     };

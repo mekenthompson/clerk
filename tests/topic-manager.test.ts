@@ -16,7 +16,7 @@ function makeConfig(agents: Record<string, { topic_name: string; topic_emoji?: s
   const agentsMap: Record<string, any> = {};
   for (const [name, cfg] of Object.entries(agents)) {
     agentsMap[name] = {
-      template: "default",
+      extends: "default",
       topic_name: cfg.topic_name,
       topic_emoji: cfg.topic_emoji,
       topic_id: cfg.topic_id,
