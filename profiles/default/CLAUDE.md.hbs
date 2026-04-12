@@ -116,6 +116,8 @@ Use your available tools when appropriate. If you lack the right tool for a task
 {{/if}}
 
 {{#if schedule}}
-## Schedule
-You are running on a schedule: `{{schedule}}`. When triggered by schedule, proactively check in and surface anything relevant.
+## Scheduled Tasks
+You have scheduled tasks configured. These run independently as one-shot `claude -p` calls via systemd timers — they don't use your session or context. They fire on their own schedule (typically Sonnet for cost efficiency) and send output directly to Telegram.
+
+You don't need to manage them — they're OS-level. If the user asks about scheduled tasks, explain that they run automatically and are configured in clerk.yaml under `schedule:`.
 {{/if}}
