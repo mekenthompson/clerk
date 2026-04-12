@@ -291,13 +291,13 @@ describe("usesClerkTelegramPlugin", () => {
     expect(usesClerkTelegramPlugin(agent)).toBe(false);
   });
 
-  it("returns false when the channels field is unset", () => {
-    expect(usesClerkTelegramPlugin(baseAgent())).toBe(false);
+  it("defaults to true (clerk fork) when channels field is unset", () => {
+    expect(usesClerkTelegramPlugin(baseAgent())).toBe(true);
   });
 
-  it("returns false when channels.telegram.plugin is unset", () => {
+  it("defaults to true (clerk fork) when channels.telegram.plugin is unset", () => {
     const agent = baseAgent({ channels: { telegram: { format: "html" } } });
-    expect(usesClerkTelegramPlugin(agent)).toBe(false);
+    expect(usesClerkTelegramPlugin(agent)).toBe(true);
   });
 });
 
