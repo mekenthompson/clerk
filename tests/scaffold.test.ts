@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { scaffoldAgent, reconcileAgent, installHindsightPlugin } from "../src/agents/scaffold.js";
-import { renderTemplate } from "../src/agents/templates.js";
+import { renderTemplate } from "../src/agents/profiles.js";
 import type { AgentConfig, ClerkConfig, TelegramConfig } from "../src/config/schema.js";
 
 const telegramConfig: TelegramConfig = {
@@ -13,7 +13,7 @@ const telegramConfig: TelegramConfig = {
 
 function makeAgentConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
   return {
-    template: "default",
+    extends: "default",
     topic_name: "Test Topic",
     schedule: [],
     ...overrides,
@@ -148,10 +148,10 @@ describe("scaffoldAgent", () => {
     expect(settings.permissions.allow).not.toContain("all");
   });
 
-  it("pre-approves clerk-telegram MCP tool names when use_clerk_plugin is true", () => {
+  it("pre-approves clerk-telegram MCP tool names when channels.telegram.plugin is 'clerk'", () => {
     const config = makeAgentConfig({
       tools: { allow: ["calendar"], deny: [] },
-      use_clerk_plugin: true,
+      channels: { telegram: { plugin: "clerk" } },
     });
     const result = scaffoldAgent("fork-agent", config, tmpDir, telegramConfig);
     const settings = JSON.parse(
@@ -165,8 +165,8 @@ describe("scaffoldAgent", () => {
     expect(settings.permissions.allow).toContain("mcp__clerk-telegram__edit_message");
   });
 
-  it("writes project-level .mcp.json when use_clerk_plugin is true", () => {
-    const agentConfig = makeAgentConfig({ use_clerk_plugin: true });
+  it("writes project-level .mcp.json when channels.telegram.plugin is 'clerk'", () => {
+    const agentConfig = makeAgentConfig({ channels: { telegram: { plugin: "clerk" } } });
     const clerkConfig: ClerkConfig = {
       clerk: { version: 1, agents_dir: tmpDir },
       telegram: telegramConfig,
@@ -199,8 +199,8 @@ describe("scaffoldAgent", () => {
     expect(mcpJson.mcpServers["clerk-telegram"].env.CLERK_CLI_PATH).toBeDefined();
   });
 
-  it("does not write .mcp.json when use_clerk_plugin is false", () => {
-    const config = makeAgentConfig({ use_clerk_plugin: false });
+  it("does not write .mcp.json when channels.telegram.plugin is 'official'", () => {
+    const config = makeAgentConfig({ channels: { telegram: { plugin: "official" } } });
     const result = scaffoldAgent("plain-agent", config, tmpDir, telegramConfig);
 
     expect(existsSync(join(result.agentDir, ".mcp.json"))).toBe(false);
@@ -467,8 +467,8 @@ describe("reconcileAgent", () => {
     expect(after.permissions.allow).toContain("mcp__hindsight__*");
   });
 
-  it("rewrites .mcp.json for use_clerk_plugin agents to include hindsight", () => {
-    const agentConfig = makeAgentConfig({ use_clerk_plugin: true });
+  it("rewrites .mcp.json for clerk-telegram-plugin agents to include hindsight", () => {
+    const agentConfig = makeAgentConfig({ channels: { telegram: { plugin: "clerk" } } });
     const initialConfig = buildClerkConfig(agentConfig);
     scaffoldAgent(
       "test-agent",
@@ -632,7 +632,7 @@ describe("installHindsightPlugin", () => {
       clerk: { version: 1, agents_dir: tmpDir },
       telegram: telegramConfig,
       memory: { backend: "none", shared_collection: "shared" },
-      agents: { agent: { template: "default", topic_name: "x", schedule: [] } },
+      agents: { agent: { extends: "default", topic_name: "x", schedule: [] } },
     } as ClerkConfig;
     expect(installHindsightPlugin("agent", agentDir, config)).toBeNull();
   });
@@ -644,7 +644,7 @@ describe("installHindsightPlugin", () => {
       memory: { backend: "hindsight", shared_collection: "shared" },
       agents: {
         agent: {
-          template: "default",
+          extends: "default",
           topic_name: "x",
           schedule: [],
           memory: { collection: "general", auto_recall: false, isolation: "default" },
@@ -665,7 +665,7 @@ describe("installHindsightPlugin", () => {
       },
       agents: {
         agent: {
-          template: "default",
+          extends: "default",
           topic_name: "x",
           schedule: [],
           memory: { collection: "general", auto_recall: true, isolation: "default" },
@@ -690,7 +690,7 @@ describe("installHindsightPlugin", () => {
       clerk: { version: 1, agents_dir: tmpDir },
       telegram: telegramConfig,
       memory: { backend: "hindsight", shared_collection: "shared" },
-      agents: { coach: { template: "default", topic_name: "x", schedule: [] } },
+      agents: { coach: { extends: "default", topic_name: "x", schedule: [] } },
     } as ClerkConfig;
     mkdirSync(join(tmpDir, "coach", ".claude"), { recursive: true });
     const result = installHindsightPlugin("coach", join(tmpDir, "coach"), config);
@@ -707,7 +707,7 @@ describe("installHindsightPlugin", () => {
         shared_collection: "shared",
         config: { provider: "openai", docker_service: true, url: "http://localhost:18888/mcp/" },
       },
-      agents: { agent: { template: "default", topic_name: "x", schedule: [] } },
+      agents: { agent: { extends: "default", topic_name: "x", schedule: [] } },
     } as ClerkConfig;
     const result = installHindsightPlugin("agent", agentDir, config);
     expect(result).not.toBeNull();
@@ -789,15 +789,15 @@ describe("scaffoldAgent with global defaults cascade", () => {
     expect(reads.length).toBe(1);
   });
 
-  it("propagates defaults.use_clerk_plugin to scaffold path", () => {
+  it("propagates defaults.channels.telegram.plugin to scaffold path", () => {
     // When the default is set globally, an agent that doesn't mention
-    // use_clerk_plugin still gets .mcp.json written and the
+    // channels.telegram.plugin=clerk still gets .mcp.json written and the
     // mcp__clerk-telegram__* tools pre-approved.
     const agentConfig = makeAgentConfig();
     const clerkConfig: ClerkConfig = {
       clerk: { version: 1, agents_dir: tmpDir },
       telegram: telegramConfig,
-      defaults: { use_clerk_plugin: true },
+      defaults: { channels: { telegram: { plugin: "clerk" } } },
       agents: { "plugin-default-agent": agentConfig },
     } as ClerkConfig;
 
@@ -811,7 +811,7 @@ describe("scaffoldAgent with global defaults cascade", () => {
       "/tmp/clerk.yaml",
     );
 
-    // .mcp.json was written (the use_clerk_plugin scaffold branch)
+    // .mcp.json was written (the clerk-telegram-plugin scaffold branch)
     expect(existsSync(join(result.agentDir, ".mcp.json"))).toBe(true);
     const settings = JSON.parse(
       readFileSync(join(result.agentDir, ".claude", "settings.json"), "utf-8"),
@@ -1096,7 +1096,7 @@ describe("scaffoldAgent with global defaults cascade", () => {
     expect(startSh).toMatch(/exec claude.*'--effort' 'high' '--add-dir' '\/tmp\/has space'/);
   });
 
-  it("channels.telegram.plugin: 'clerk' writes .mcp.json like legacy use_clerk_plugin", () => {
+  it("channels.telegram.plugin: 'clerk' writes .mcp.json for forked telegram plugin", () => {
     const agentConfig = makeAgentConfig({
       channels: { telegram: { plugin: "clerk" } },
     });
@@ -1128,19 +1128,18 @@ describe("scaffoldAgent with global defaults cascade", () => {
     expect(startSh).toContain("--dangerously-load-development-channels server:clerk-telegram");
   });
 
-  it("channels.telegram.plugin: 'official' wins even if legacy use_clerk_plugin is true", () => {
+  it("channels.telegram.plugin: 'official' keeps the upstream marketplace plugin", () => {
     const agentConfig = makeAgentConfig({
-      use_clerk_plugin: true,
       channels: { telegram: { plugin: "official" } },
     });
     const result = scaffoldAgent(
-      "override-agent",
+      "official-agent",
       agentConfig,
       tmpDir,
       telegramConfig,
     );
 
-    // No .mcp.json because effective plugin is official
+    // No .mcp.json because the clerk-telegram fork isn't loaded
     expect(existsSync(join(result.agentDir, ".mcp.json"))).toBe(false);
     const startSh = readFileSync(join(result.agentDir, "start.sh"), "utf-8");
     expect(startSh).toContain("--channels plugin:telegram@claude-plugins-official");
@@ -1218,7 +1217,7 @@ describe("scaffoldAgent with global defaults cascade", () => {
     // as the pre-refactor code path would have.
     const agentConfig = makeAgentConfig({
       tools: { allow: ["Bash", "Edit"], deny: [] },
-      use_clerk_plugin: true,
+      channels: { telegram: { plugin: "clerk" } },
     });
     const clerkConfig: ClerkConfig = {
       clerk: { version: 1, agents_dir: tmpDir },
@@ -1403,6 +1402,86 @@ describe("scaffoldAgent global skills pool", () => {
     // template-skill survives because it's a real directory, not a
     // symlink pointing into the pool
     expect(existsSync(templateSkill)).toBe(true);
+  });
+});
+
+describe("scaffoldAgent with inline profiles (extends cascade)", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "clerk-profiles-"));
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("merges inline profile between defaults and per-agent config", () => {
+    const agentConfig = makeAgentConfig({ extends: "coder" });
+    const clerkConfig: ClerkConfig = {
+      clerk: { version: 1, agents_dir: tmpDir },
+      telegram: telegramConfig,
+      defaults: {
+        tools: { allow: ["Read"] },
+        model: "claude-sonnet-4-6",
+      },
+      profiles: {
+        coder: {
+          tools: { allow: ["Bash", "Edit"] },
+          system_prompt_append: "You write code.",
+        },
+      },
+      agents: { "profile-agent": agentConfig },
+    } as ClerkConfig;
+
+    const result = scaffoldAgent(
+      "profile-agent",
+      agentConfig,
+      tmpDir,
+      telegramConfig,
+      clerkConfig,
+    );
+    const settings = JSON.parse(
+      readFileSync(join(result.agentDir, ".claude", "settings.json"), "utf-8"),
+    );
+
+    // Tools unioned across defaults (Read) + profile (Bash, Edit)
+    expect(settings.permissions.allow).toContain("Read");
+    expect(settings.permissions.allow).toContain("Bash");
+    expect(settings.permissions.allow).toContain("Edit");
+    // Model from defaults flows through profile (which doesn't set it)
+    expect(settings.model).toBe("claude-sonnet-4-6");
+
+    // system_prompt_append from the profile landed in start.sh
+    const startSh = readFileSync(join(result.agentDir, "start.sh"), "utf-8");
+    expect(startSh).toContain("You write code.");
+  });
+
+  it("per-agent fields still win over inline profile fields", () => {
+    const agentConfig = makeAgentConfig({
+      extends: "coder",
+      model: "claude-opus-4-6",
+    });
+    const clerkConfig: ClerkConfig = {
+      clerk: { version: 1, agents_dir: tmpDir },
+      telegram: telegramConfig,
+      profiles: {
+        coder: { model: "claude-sonnet-4-6" },
+      },
+      agents: { "override-agent": agentConfig },
+    } as ClerkConfig;
+
+    const result = scaffoldAgent(
+      "override-agent",
+      agentConfig,
+      tmpDir,
+      telegramConfig,
+      clerkConfig,
+    );
+    const settings = JSON.parse(
+      readFileSync(join(result.agentDir, ".claude", "settings.json"), "utf-8"),
+    );
+    expect(settings.model).toBe("claude-opus-4-6");
   });
 });
 

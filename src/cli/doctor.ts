@@ -323,8 +323,8 @@ function checkAgents(config: ClerkConfig, configPath: string): CheckResult[] {
       });
     }
 
-    // 4. MCP wireup drift detection (use_clerk_plugin agents)
-    if (agentConfig.use_clerk_plugin === true) {
+    // 4. MCP wireup drift detection (clerk-telegram plugin agents)
+    if (agentConfig.channels?.telegram?.plugin === "clerk") {
       const mcpJsonPath = join(agentDir, ".mcp.json");
       if (!existsSync(mcpJsonPath)) {
         results.push({

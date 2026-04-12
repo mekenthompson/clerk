@@ -96,7 +96,7 @@ export function registerAgentCommand(program: Command): void {
               name,
               status: status?.active ?? "unknown",
               uptime: formatUptime(status?.uptime ?? null),
-              template: agentConfig.template ?? "default",
+              extends: agentConfig.extends ?? "default",
               topic_name: agentConfig.topic_name,
               topic_emoji: agentConfig.topic_emoji,
             };
@@ -122,7 +122,7 @@ export function registerAgentCommand(program: Command): void {
             name,
             statusColor(status?.active ?? "unknown"),
             formatUptime(status?.uptime ?? null),
-            agentConfig.template ?? "default",
+            agentConfig.extends ?? "default",
             topicDisplay,
           ];
         });
@@ -169,7 +169,9 @@ export function registerAgentCommand(program: Command): void {
 
         // Also generate and install the systemd unit
         const agentDir = resolve(agentsDir, name);
-        const useAutoaccept = agentConfig.use_clerk_plugin === true;
+        // Effective clerk-plugin flag is driven by channels.telegram.plugin.
+        // This mirrors usesClerkTelegramPlugin() in src/config/merge.ts.
+        const useAutoaccept = agentConfig.channels?.telegram?.plugin === "clerk";
         const unitContent = generateUnit(name, agentDir, useAutoaccept);
         installUnit(name, unitContent);
 

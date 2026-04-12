@@ -192,7 +192,7 @@ describe("vault resolver", () => {
         vault: { path: vaultPath },
         agents: {
           test: {
-            template: "default",
+            extends: "default",
             topic_name: "Test",
             schedule: [],
           },
@@ -214,7 +214,7 @@ describe("vault resolver", () => {
         vault: { path: vaultPath },
         agents: {
           test: {
-            template: "default",
+            extends: "default",
             topic_name: "Test",
             schedule: [],
           },

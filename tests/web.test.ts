@@ -43,7 +43,7 @@ const mockConfig: ClerkConfig = {
   telegram: { bot_token: "test-token", forum_chat_id: "-1001234" },
   agents: {
     coach: {
-      template: "health-coach",
+      extends: "health-coach",
       topic_name: "Fitness Coach",
       topic_emoji: "\u{1F3CB}\u{FE0F}",
       schedule: [],
@@ -52,7 +52,7 @@ const mockConfig: ClerkConfig = {
       memory: { collection: "coach-mem", auto_recall: true, isolation: "default" },
     },
     sage: {
-      template: "default",
+      extends: "default",
       topic_name: "Wisdom",
       topic_emoji: "\u{1F9D9}",
       schedule: [],

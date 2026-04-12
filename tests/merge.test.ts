@@ -1,11 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { mergeAgentConfig } from "../src/config/merge.js";
-import type { AgentConfig, AgentDefaults } from "../src/config/schema.js";
+import { mergeAgentConfig, resolveAgentConfig } from "../src/config/merge.js";
+import type { AgentConfig, AgentDefaults, Profile } from "../src/config/schema.js";
 
 function baseAgent(overrides: Partial<AgentConfig> = {}): AgentConfig {
-  // Intentionally omit `template` — AgentSchema.template is now optional
-  // (no zod default) so the cascade can fill it in. Tests that want to
-  // pin a template set it via overrides explicitly.
+  // Intentionally omit `extends` — AgentSchema.extends is optional (no
+  // zod default) so the cascade can fill it in. Tests that want to pin
+  // an extends target set it via overrides explicitly.
   return {
     topic_name: "T",
     schedule: [],
@@ -34,43 +34,26 @@ describe("mergeAgentConfig", () => {
     const defaults: AgentDefaults = {
       model: "sonnet",
       dangerous_mode: false,
-      use_clerk_plugin: true,
     };
     const result = mergeAgentConfig(defaults, baseAgent());
     expect(result.model).toBe("sonnet");
     expect(result.dangerous_mode).toBe(false);
-    expect(result.use_clerk_plugin).toBe(true);
   });
 
   it("preserves agent scalars over defaults (agent wins)", () => {
-    const defaults: AgentDefaults = { model: "sonnet", use_clerk_plugin: true };
-    const agent = baseAgent({ model: "opus", use_clerk_plugin: false });
+    const defaults: AgentDefaults = { model: "sonnet" };
+    const agent = baseAgent({ model: "opus" });
     const result = mergeAgentConfig(defaults, agent);
     expect(result.model).toBe("opus");
-    expect(result.use_clerk_plugin).toBe(false);
   });
 
-  it("fills in template from defaults when agent leaves it unset", () => {
-    const defaults: AgentDefaults = { template: "coding" };
-    const result = mergeAgentConfig(defaults, baseAgent());
-    expect(result.template).toBe("coding");
-  });
-
-  it("respects an explicit agent template 'default' even with a non-default global", () => {
-    // Regression: AgentSchema.template used to have a zod default of
-    // "default" which made this case ambiguous (we couldn't tell if the
-    // user wrote `template: default` or left it unset). Phase-1 cleanup
-    // dropped the zod default; consumers fall back to DEFAULT_TEMPLATE
-    // if the merge still leaves it undefined.
-    const defaults: AgentDefaults = { template: "coding" };
-    const result = mergeAgentConfig(defaults, baseAgent({ template: "default" }));
-    expect(result.template).toBe("default");
-  });
-
-  it("preserves non-default agent template against a defaults.template", () => {
-    const defaults: AgentDefaults = { template: "coding" };
-    const result = mergeAgentConfig(defaults, baseAgent({ template: "health-coach" }));
-    expect(result.template).toBe("health-coach");
+  it("leaves agent.extends unchanged — the cascade resolves profiles separately", () => {
+    // mergeAgentConfig() is the defaults → agent primitive; profile
+    // resolution happens in resolveAgentConfig(). AgentDefaults does
+    // not carry `extends`, so this field is purely agent-driven here.
+    const agent = baseAgent({ extends: "coding" });
+    const result = mergeAgentConfig({ model: "sonnet" }, agent);
+    expect(result.extends).toBe("coding");
   });
 
   it("unions tools.allow preserving order (defaults first, dedup)", () => {
@@ -291,7 +274,7 @@ describe("mergeAgentConfig channels block", () => {
   });
 });
 
-describe("usesClerkTelegramPlugin backcompat", () => {
+describe("usesClerkTelegramPlugin", () => {
   const { usesClerkTelegramPlugin } = require("../src/config/merge.js");
 
   it("returns true when channels.telegram.plugin is 'clerk'", () => {
@@ -308,24 +291,54 @@ describe("usesClerkTelegramPlugin backcompat", () => {
     expect(usesClerkTelegramPlugin(agent)).toBe(false);
   });
 
-  it("returns true for legacy use_clerk_plugin: true", () => {
-    const agent = baseAgent({ use_clerk_plugin: true });
-    expect(usesClerkTelegramPlugin(agent)).toBe(true);
+  it("returns false when the channels field is unset", () => {
+    expect(usesClerkTelegramPlugin(baseAgent())).toBe(false);
   });
 
-  it("new channels.telegram.plugin: 'official' overrides legacy use_clerk_plugin: true", () => {
-    // If a user sets both (stale migration), the new form wins because
-    // it's the more explicit signal.
+  it("returns false when channels.telegram.plugin is unset", () => {
+    const agent = baseAgent({ channels: { telegram: { format: "html" } } });
+    expect(usesClerkTelegramPlugin(agent)).toBe(false);
+  });
+});
+
+describe("resolveAgentConfig", () => {
+  it("layers defaults → inline profile → agent in that order", () => {
+    const defaults: AgentDefaults = {
+      model: "sonnet",
+      tools: { allow: ["Read"] },
+    };
+    const profiles: Record<string, Profile> = {
+      coding: {
+        tools: { allow: ["Bash", "Edit"] },
+        system_prompt_append: "You write code.",
+      },
+    };
     const agent = baseAgent({
-      use_clerk_plugin: true,
-      channels: { telegram: { plugin: "official" } },
+      extends: "coding",
+      tools: { allow: ["Grep"], deny: [] },
     });
-    expect(usesClerkTelegramPlugin(agent)).toBe(false);
+    const result = resolveAgentConfig(defaults, profiles, agent);
+
+    // tools unioned across all three layers, defaults first, then profile, then agent
+    expect(result.tools?.allow).toEqual(["Read", "Bash", "Edit", "Grep"]);
+    // Model flows from defaults through profile (profile doesn't set it) to result
+    expect(result.model).toBe("sonnet");
+    // System prompt flows from profile
+    expect(result.system_prompt_append).toBe("You write code.");
   });
 
-  it("returns false when neither field is set", () => {
-    const agent = baseAgent();
-    expect(usesClerkTelegramPlugin(agent)).toBe(false);
+  it("ignores unknown profile names (filesystem fallback handles them)", () => {
+    const agent = baseAgent({ extends: "does-not-exist" });
+    const result = resolveAgentConfig(undefined, undefined, agent);
+    // Merge didn't throw; agent.extends preserved so scaffold can still
+    // try the filesystem profile path.
+    expect(result.extends).toBe("does-not-exist");
+  });
+
+  it("no-ops when defaults+profiles+extends are all absent", () => {
+    const agent = baseAgent({ model: "opus" });
+    const result = resolveAgentConfig(undefined, undefined, agent);
+    expect(result).toEqual(agent);
   });
 });
 

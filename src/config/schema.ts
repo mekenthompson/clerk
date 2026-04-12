@@ -138,77 +138,94 @@ export const ChannelsSchema = z
   .optional();
 
 /**
- * Subset of AgentSchema fields that can be set at the global `defaults:`
- * level in clerk.yaml. Every field is optional and no zod defaults are
- * applied — `mergeAgentConfig` (src/config/merge.ts) layers the parsed
- * defaults onto each per-agent config before scaffold/reconcile runs.
+ * A Profile is a named bundle of config that agents inherit from via
+ * `extends: <name>`. Profiles can be defined two ways:
  *
- * Per-agent-only fields (topic_name, topic_emoji, topic_id) are
- * intentionally excluded because they're identity-ish — defaulting a
- * topic name across all agents would collapse them onto the same
- * Telegram thread.
+ *   1. Inline in clerk.yaml under top-level `profiles: { name: {...} }`
+ *   2. As a filesystem directory at `profiles/<name>/` inside the
+ *      clerk repo, containing CLAUDE.md.hbs + SOUL.md.hbs + skills/
+ *
+ * Inline profiles take priority when both exist with the same name.
+ *
+ * The schema is the same shape as AgentDefaultsSchema below — every
+ * field is optional, no zod defaults — because a profile is literally
+ * "a partial agent config". AgentDefaultsSchema is a specialization
+ * (the implicit profile that applies to ALL agents).
+ *
+ * Per-agent-identity fields (topic_name, topic_emoji, topic_id) are
+ * intentionally excluded from profiles for the same reason they're
+ * excluded from defaults — defaulting a topic name across multiple
+ * agents would collapse them onto the same Telegram thread.
  */
-export const AgentDefaultsSchema = z
-  .object({
-    template: z.string().optional(),
-    bot_token: z.string().optional(),
-    soul: z
-      .object({
-        name: z.string().optional(),
-        style: z.string().optional(),
-        boundaries: z.string().optional(),
-      })
-      .optional(),
-    tools: z
-      .object({
-        allow: z.array(z.string()).optional(),
-        deny: z.array(z.string()).optional(),
-      })
-      .optional(),
-    memory: z
-      .object({
-        collection: z.string().optional(),
-        auto_recall: z.boolean().optional(),
-        isolation: z.enum(["default", "strict"]).optional(),
-      })
-      .optional(),
-    schedule: z.array(ScheduleEntrySchema).optional(),
-    model: z.string().optional(),
-    mcp_servers: z.record(z.string(), z.unknown()).optional(),
-    hooks: AgentHooksSchema,
-    env: z.record(z.string(), z.string()).optional(),
-    system_prompt_append: z.string().optional(),
-    skills: z.array(z.string()).optional(),
-    channels: ChannelsSchema,
-    dangerous_mode: z.boolean().optional(),
-    skip_permission_prompt: z.boolean().optional(),
-    use_clerk_plugin: z.boolean().optional(),
-    settings_raw: z.record(z.string(), z.unknown()).optional(),
-    claude_md_raw: z.string().optional(),
-    cli_args: z.array(z.string()).optional(),
-  })
-  .optional();
+const profileFields = {
+  extends: z.string().optional(),
+  bot_token: z.string().optional(),
+  soul: z
+    .object({
+      name: z.string().optional(),
+      style: z.string().optional(),
+      boundaries: z.string().optional(),
+    })
+    .optional(),
+  tools: z
+    .object({
+      allow: z.array(z.string()).optional(),
+      deny: z.array(z.string()).optional(),
+    })
+    .optional(),
+  memory: z
+    .object({
+      collection: z.string().optional(),
+      auto_recall: z.boolean().optional(),
+      isolation: z.enum(["default", "strict"]).optional(),
+    })
+    .optional(),
+  schedule: z.array(ScheduleEntrySchema).optional(),
+  model: z.string().optional(),
+  mcp_servers: z.record(z.string(), z.unknown()).optional(),
+  hooks: AgentHooksSchema,
+  env: z.record(z.string(), z.string()).optional(),
+  system_prompt_append: z.string().optional(),
+  skills: z.array(z.string()).optional(),
+  channels: ChannelsSchema,
+  dangerous_mode: z.boolean().optional(),
+  skip_permission_prompt: z.boolean().optional(),
+  settings_raw: z.record(z.string(), z.unknown()).optional(),
+  claude_md_raw: z.string().optional(),
+  cli_args: z.array(z.string()).optional(),
+};
 
 /**
- * Fallback template name when neither an agent's config nor the global
- * `defaults:` block specifies one. Consumers should read template via
- * `agentConfig.template ?? DEFAULT_TEMPLATE` to get the effective value.
- *
- * We keep this as an explicit constant (rather than a zod default) so
- * the `defaults.template` cascade can actually reach an agent whose
- * field is left unset — zod defaults would fire at parse time and
- * make the agent's template indistinguishable from an explicit choice.
+ * Profiles are named partial configs that agents inherit from via
+ * `extends: <name>`. See `profileFields` above for the full shape.
  */
-export const DEFAULT_TEMPLATE = "default";
+export const ProfileSchema = z.object(profileFields);
+
+/**
+ * AgentDefaultsSchema is the implicit profile applied to every agent
+ * before their own per-agent config and their `extends:` target. It
+ * has the same shape as a profile but doesn't itself support
+ * `extends:` (the defaults block IS the bottom of the cascade).
+ */
+const { extends: _omitExtends, ...defaultsFields } = profileFields;
+export const AgentDefaultsSchema = z.object(defaultsFields).optional();
+
+/**
+ * Name of the implicit filesystem profile used when no `extends:`
+ * field is declared and no inline profile matches. Corresponds to the
+ * `profiles/default/` directory bundled with clerk.
+ */
+export const DEFAULT_PROFILE = "default";
 
 export const AgentSchema = z.object({
-  template: z
+  extends: z
     .string()
     .optional()
     .describe(
-      "Template to scaffold from (e.g., 'health-coach'). " +
-      "Defaults to 'default' via DEFAULT_TEMPLATE if unset at both " +
-      "agent and clerk.yaml `defaults:` levels.",
+      "Name of a profile to inherit from (e.g., 'coding', 'health-coach'). " +
+      "Profiles may be defined inline under clerk.yaml `profiles:` or as a " +
+      "filesystem directory `profiles/<name>/`. Defaults to DEFAULT_PROFILE " +
+      "('default') when unset.",
     ),
   bot_token: z
     .string()
@@ -270,14 +287,6 @@ export const AgentSchema = z.object({
     .boolean()
     .optional()
     .describe("If true, add skipDangerousModePermissionPrompt to settings.json"),
-  use_clerk_plugin: z
-    .boolean()
-    .optional()
-    .describe(
-      "DEPRECATED: prefer channels.telegram.plugin: 'clerk'. " +
-      "Kept for backward compatibility — both forms are accepted " +
-      "and produce the same scaffold output.",
-    ),
   settings_raw: z
     .record(z.string(), z.unknown())
     .optional()
@@ -380,10 +389,19 @@ export const ClerkConfigSchema = z.object({
   memory: MemoryBackendConfigSchema.optional(),
   vault: VaultConfigSchema.optional(),
   defaults: AgentDefaultsSchema.describe(
-    "Global defaults merged into every agent before per-agent config. " +
-    "Tools, mcp_servers, and schedule are unioned/concatenated; scalars and " +
-    "nested objects are shallow-merged with per-agent values winning.",
+    "Implicit bottom-of-cascade profile applied to every agent before " +
+    "per-agent config and `extends:` resolution. Tools, mcp_servers, and " +
+    "schedule are unioned/concatenated; scalars and nested objects are " +
+    "shallow-merged with per-agent values winning.",
   ),
+  profiles: z
+    .record(z.string(), ProfileSchema)
+    .optional()
+    .describe(
+      "Named profile definitions. Agents reference via `extends: <name>`. " +
+      "Inline profiles declared here take priority over filesystem " +
+      "profiles/<name>/ directories when both exist.",
+    ),
   agents: z
     .record(
       z.string().regex(/^[a-z0-9][a-z0-9_-]*$/, {
@@ -397,6 +415,7 @@ export const ClerkConfigSchema = z.object({
 export type ClerkConfig = z.infer<typeof ClerkConfigSchema>;
 export type AgentConfig = z.infer<typeof AgentSchema>;
 export type AgentDefaults = z.infer<typeof AgentDefaultsSchema>;
+export type Profile = z.infer<typeof ProfileSchema>;
 export type AgentHooks = z.infer<typeof AgentHooksSchema>;
 export type HookEntry = z.infer<typeof HookEntrySchema>;
 export type Channels = z.infer<typeof ChannelsSchema>;
