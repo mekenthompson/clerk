@@ -1603,6 +1603,221 @@ describe("phase-6b bug fixes", () => {
   });
 });
 
+describe("sub-agent file generation", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "clerk-subagents-"));
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("generates .claude/agents/<name>.md from subagents config", () => {
+    const agentConfig = makeAgentConfig({
+      subagents: {
+        worker: {
+          description: "Handles implementation tasks",
+          model: "sonnet",
+          background: true,
+          isolation: "worktree",
+          maxTurns: 30,
+          color: "blue",
+          prompt: "You are a worker. Implement the task.",
+        },
+      },
+    });
+    const clerkConfig: ClerkConfig = {
+      clerk: { version: 1, agents_dir: tmpDir },
+      telegram: telegramConfig,
+      agents: { "sa-agent": agentConfig },
+    } as ClerkConfig;
+
+    const result = scaffoldAgent(
+      "sa-agent",
+      agentConfig,
+      tmpDir,
+      telegramConfig,
+      clerkConfig,
+    );
+
+    const mdPath = join(result.agentDir, ".claude", "agents", "worker.md");
+    expect(existsSync(mdPath)).toBe(true);
+
+    const content = readFileSync(mdPath, "utf-8");
+    // Frontmatter
+    expect(content).toContain("name: worker");
+    expect(content).toContain("description: Handles implementation tasks");
+    expect(content).toContain("model: sonnet");
+    expect(content).toContain("background: true");
+    expect(content).toContain("isolation: worktree");
+    expect(content).toContain("maxTurns: 30");
+    expect(content).toContain("color: blue");
+    // Body (after frontmatter)
+    expect(content).toContain("You are a worker. Implement the task.");
+  });
+
+  it("merges defaults.subagents with agent.subagents by name", () => {
+    const agentConfig = makeAgentConfig({
+      subagents: {
+        reviewer: {
+          description: "Reviews work",
+          model: "sonnet",
+          prompt: "Review thoroughly.",
+        },
+      },
+    });
+    const clerkConfig: ClerkConfig = {
+      clerk: { version: 1, agents_dir: tmpDir },
+      telegram: telegramConfig,
+      defaults: {
+        subagents: {
+          worker: {
+            description: "Default worker",
+            model: "sonnet",
+            background: true,
+            prompt: "Default worker prompt.",
+          },
+        },
+      },
+      agents: { "merge-sa": agentConfig },
+    } as ClerkConfig;
+
+    const result = scaffoldAgent(
+      "merge-sa",
+      agentConfig,
+      tmpDir,
+      telegramConfig,
+      clerkConfig,
+    );
+
+    const agentsDir = join(result.agentDir, ".claude", "agents");
+    // Both sub-agents exist
+    expect(existsSync(join(agentsDir, "worker.md"))).toBe(true);
+    expect(existsSync(join(agentsDir, "reviewer.md"))).toBe(true);
+    // Worker comes from defaults
+    expect(readFileSync(join(agentsDir, "worker.md"), "utf-8")).toContain(
+      "Default worker prompt.",
+    );
+    // Reviewer comes from agent
+    expect(readFileSync(join(agentsDir, "reviewer.md"), "utf-8")).toContain(
+      "Review thoroughly.",
+    );
+  });
+
+  it("agent subagent overrides default subagent with same name", () => {
+    const agentConfig = makeAgentConfig({
+      subagents: {
+        worker: {
+          description: "Custom worker",
+          model: "opus",
+          prompt: "I am the override.",
+        },
+      },
+    });
+    const clerkConfig: ClerkConfig = {
+      clerk: { version: 1, agents_dir: tmpDir },
+      telegram: telegramConfig,
+      defaults: {
+        subagents: {
+          worker: {
+            description: "Default worker",
+            model: "sonnet",
+            prompt: "I am the default.",
+          },
+        },
+      },
+      agents: { "override-sa": agentConfig },
+    } as ClerkConfig;
+
+    const result = scaffoldAgent(
+      "override-sa",
+      agentConfig,
+      tmpDir,
+      telegramConfig,
+      clerkConfig,
+    );
+
+    const content = readFileSync(
+      join(result.agentDir, ".claude", "agents", "worker.md"),
+      "utf-8",
+    );
+    expect(content).toContain("model: opus");
+    expect(content).toContain("I am the override.");
+    expect(content).not.toContain("I am the default.");
+  });
+
+  it("reconcile updates sub-agent files when config changes", () => {
+    const initial = makeAgentConfig({
+      subagents: {
+        worker: {
+          description: "v1 worker",
+          model: "sonnet",
+          prompt: "Version 1.",
+        },
+      },
+    });
+    const clerkConfig: ClerkConfig = {
+      clerk: { version: 1, agents_dir: tmpDir },
+      telegram: telegramConfig,
+      agents: { "rec-sa": initial },
+    } as ClerkConfig;
+    scaffoldAgent("rec-sa", initial, tmpDir, telegramConfig, clerkConfig);
+
+    const mdPath = join(tmpDir, "rec-sa", ".claude", "agents", "worker.md");
+    expect(readFileSync(mdPath, "utf-8")).toContain("Version 1.");
+
+    // Update subagent prompt
+    const updated = makeAgentConfig({
+      subagents: {
+        worker: {
+          description: "v2 worker",
+          model: "sonnet",
+          prompt: "Version 2 — improved.",
+        },
+      },
+    });
+    const updatedConfig: ClerkConfig = {
+      ...clerkConfig,
+      agents: { "rec-sa": updated },
+    } as ClerkConfig;
+    const result = reconcileAgent(
+      "rec-sa",
+      updated,
+      tmpDir,
+      telegramConfig,
+      updatedConfig,
+    );
+
+    expect(result.changes).toContain(mdPath);
+    expect(readFileSync(mdPath, "utf-8")).toContain("Version 2 — improved.");
+  });
+
+  it("generates tools as comma-separated string in frontmatter", () => {
+    const agentConfig = makeAgentConfig({
+      subagents: {
+        safe: {
+          description: "Read-only agent",
+          tools: ["Read", "Grep", "Glob"],
+          prompt: "Read only.",
+        },
+      },
+    });
+    const result = scaffoldAgent(
+      "tools-sa",
+      agentConfig,
+      tmpDir,
+      telegramConfig,
+    );
+    const content = readFileSync(
+      join(result.agentDir, ".claude", "agents", "safe.md"),
+      "utf-8",
+    );
+    expect(content).toContain("tools: Read, Grep, Glob");
+  });
+});
+
 describe("session freshness check in start.sh", () => {
   let tmpDir: string;
 
