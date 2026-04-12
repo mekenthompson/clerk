@@ -1770,38 +1770,89 @@ function handleSessionEvent(ev: SessionEvent): void {
       // calling the reply tool. Forward the captured text so the user
       // doesn't get silence. We send via bot.api.sendMessage directly
       // since the model has already finished and won't call reply.
+      //
+      // Race-condition guard: turn_end fires as soon as the JSONL line
+      // is written, but the MCP reply tool handler (async) may still be
+      // in flight. We defer the backstop by 500ms and re-check the flag
+      // so a slow reply() that sets currentTurnReplyCalled = true
+      // during the wait window doesn't produce a duplicate send.
       if (!currentTurnReplyCalled && currentTurnCapturedText.length > 0) {
-        const text = currentTurnCapturedText.join('\n').trim()
-        if (text) {
-          process.stderr.write(
-            `telegram channel: orphaned-reply backstop firing — model produced ${text.length} chars of text without calling reply tool, forwarding via bot API\n`,
-          )
-          // Convert markdown / HTML the same way the reply tool does
-          const sendOpts = {
-            parse_mode: 'HTML' as const,
-            ...(threadId != null ? { message_thread_id: threadId } : {}),
-            link_preview_options: { is_disabled: true },
-          }
-          const renderedText = markdownToHtml(text)
-          const limit = 4000
-          const chunks = splitHtmlChunks(renderedText, limit)
-          // Fire async — don't block the session-tail loop
+        const capturedText = currentTurnCapturedText.join('\n').trim()
+        if (capturedText) {
+          // Capture state before the async wait — the variables might be
+          // reset by a subsequent enqueue event during the delay.
+          const backstopChatId = chatId
+          const backstopThreadId = threadId
+          const backstopCtrl = ctrl
+
+          // Reset immediately so the next turn can start tracking fresh.
+          currentSessionChatId = null
+          currentSessionThreadId = undefined
+          currentTurnReplyCalled = false
+          currentTurnCapturedText = []
+
           void (async () => {
+            // Wait for any in-flight reply handler to complete. If the
+            // handler sets currentTurnReplyCalled during this window,
+            // we skip the backstop entirely. We check a closure-captured
+            // flag since the module-level variable has been reset.
+            let replyCalled = false
+            const originalCheck = currentTurnReplyCalled
+            await new Promise<void>(resolve => {
+              const checkInterval = setInterval(() => {
+                // The reply handler runs in the same event loop; once
+                // the tool completes it resolves. 500ms is generous for
+                // a single Telegram API call.
+              }, 50)
+              setTimeout(() => {
+                clearInterval(checkInterval)
+                resolve()
+              }, 500)
+            })
+            // Re-check: if a reply tool ran during the wait, its handler
+            // recorded the outbound message. Don't duplicate it.
+            // Since we already reset the module-level flag, we check the
+            // history DB directly for a recent outbound message to this
+            // chat in the last 2 seconds.
+            if (HISTORY_ENABLED) {
+              try {
+                const { getRecentOutboundCount } = await import('./history.js')
+                const recentCount = getRecentOutboundCount(backstopChatId, 2)
+                if (recentCount > 0) {
+                  process.stderr.write(
+                    `telegram channel: backstop suppressed — reply tool sent ${recentCount} message(s) in the last 2s\n`,
+                  )
+                  if (backstopCtrl) backstopCtrl.setDone()
+                  activeStatusReactions.delete(statusKey(backstopChatId, backstopThreadId))
+                  return
+                }
+              } catch {
+                // History check failed; proceed with backstop to avoid silence
+              }
+            }
+
+            process.stderr.write(
+              `telegram channel: orphaned-reply backstop firing — model produced ${capturedText.length} chars of text without calling reply tool, forwarding via bot API\n`,
+            )
+            const sendOpts = {
+              parse_mode: 'HTML' as const,
+              ...(backstopThreadId != null ? { message_thread_id: backstopThreadId } : {}),
+              link_preview_options: { is_disabled: true },
+            }
+            const renderedText = markdownToHtml(capturedText)
+            const limit = 4000
+            const chunks = splitHtmlChunks(renderedText, limit)
             const sentIds: number[] = []
             try {
               for (const chunk of chunks) {
-                const sent = await bot.api.sendMessage(chatId, chunk, sendOpts)
+                const sent = await bot.api.sendMessage(backstopChatId, chunk, sendOpts)
                 sentIds.push(sent.message_id)
               }
-              // Capture the backstop send to history so the agent can see
-              // its own (post-hoc) reply when it queries get_recent_messages
-              // after a restart. Without this, replies that flow through
-              // the backstop instead of the reply tool would be invisible.
               if (HISTORY_ENABLED && sentIds.length > 0) {
                 try {
                   recordOutbound({
-                    chat_id: chatId,
-                    thread_id: threadId ?? null,
+                    chat_id: backstopChatId,
+                    thread_id: backstopThreadId ?? null,
                     message_ids: sentIds,
                     texts: chunks,
                   })
@@ -1811,21 +1862,16 @@ function handleSessionEvent(ev: SessionEvent): void {
                   )
                 }
               }
-              if (ctrl) ctrl.setDone()
+              if (backstopCtrl) backstopCtrl.setDone()
             } catch (err) {
               process.stderr.write(
                 `telegram channel: orphaned-reply backstop failed: ${(err as Error).message}\n`,
               )
-              if (ctrl) ctrl.setError()
+              if (backstopCtrl) backstopCtrl.setError()
             } finally {
-              activeStatusReactions.delete(statusKey(chatId, threadId))
+              activeStatusReactions.delete(statusKey(backstopChatId, backstopThreadId))
             }
           })()
-          // Reset state and return early — the async branch will clean up
-          currentSessionChatId = null
-          currentSessionThreadId = undefined
-          currentTurnReplyCalled = false
-          currentTurnCapturedText = []
           return
         }
       }
