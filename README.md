@@ -29,7 +29,6 @@ sudo usermod -aG docker $USER && newgrp docker   # Docker without sudo
 # 2. Install Clerk
 git clone https://github.com/mekenthompson/clerk.git ~/code/clerk
 cd ~/code/clerk && bun install && bun link
-# (npm publish coming — once available: `npm install -g clerk-ai`)
 
 # 3. Run the interactive setup wizard
 clerk setup
@@ -198,7 +197,8 @@ A few gotchas that trip people up during first-time setup:
 ### Install and Setup
 
 ```bash
-npm install -g clerk-ai
+git clone https://github.com/mekenthompson/clerk.git ~/code/clerk
+cd ~/code/clerk && bun install && bun link
 clerk setup
 ```
 
@@ -347,14 +347,17 @@ Add a new agent: add a few lines to `clerk.yaml`, create a bot via @BotFather, r
 # Setup
 clerk setup                         # Interactive wizard (recommended path)
 clerk doctor [--json]               # Health check: deps, vault, memory, MCP, services
+clerk update [--check] [--no-restart]
+                                    # Pull latest source, reinstall deps, reconcile + restart
 clerk init [--example <name>]       # Scaffold agents + install systemd units
 clerk vault init                    # Create encrypted vault
 clerk vault set <key>               # Store a secret
 clerk vault get <key>               # Retrieve a secret
+clerk vault remove <key>            # Delete a secret
 clerk vault list                    # List secret key names
 
 # Authentication
-clerk auth login <name|all>         # Show onboarding instructions for agent(s)
+clerk auth login <name>             # Show onboarding instructions for an agent
 clerk auth status [--json]          # Token status for all agents
 clerk auth refresh <name>           # Show instructions to refresh tokens
 
@@ -368,17 +371,22 @@ clerk agent stop <name|all>         # Stop agent(s)
 clerk agent restart <name|all>      # Restart agent(s)
 clerk agent attach <name>           # Interactive tmux session
 clerk agent logs <name> [-f]        # View/follow logs
+clerk agent grant <name> <tool>     # Add a tool (or 'all') to tools.allow and reconcile
+clerk agent dangerous <name>        # Enable full tool access (tools.allow: [all]) and reconcile
+clerk agent permissions <name>      # Show current permissions.allow list
 clerk agent destroy <name> [-y]     # Remove agent (with confirmation)
 
 # Telegram
 clerk topics sync                   # Create forum topics from config
 clerk topics list                   # Show topic-to-agent mapping
+clerk topics cleanup                # Close orphaned topics no longer in clerk.yaml
 
 # Memory (Hindsight)
 clerk memory setup                  # Start Hindsight Docker container
 clerk memory setup --status         # Check container status
 clerk memory setup --stop           # Stop and remove container
-clerk memory docker-compose         # Output docker-compose snippet
+clerk memory docker-compose [--provider <openai|anthropic|ollama>]
+                                    # Output docker-compose snippet
 clerk memory search <query> [--agent <name>]
 clerk memory stats                  # Per-agent collection info
 clerk memory reflect                # Cross-agent synthesis plan

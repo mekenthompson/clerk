@@ -208,16 +208,22 @@ The plugin includes built-in `/commands` that execute `clerk` CLI operations dir
 
 ### Available commands
 
+Each plugin instance is bound to one agent (via `CLERK_AGENT_NAME` set by `start.sh`), so per-agent commands default to **the current agent**. Pass an explicit name only when you want to act on a different one.
+
 | Command | Description |
 |---------|-------------|
 | `/agents` | List all agents and their status |
-| `/clerkstart <name>` | Start an agent |
-| `/stop <name>` | Stop an agent |
-| `/restart <name\|all>` | Restart an agent (or all) |
+| `/clerkstart [name]` | Start an agent (default: this agent) |
+| `/stop [name]` | Stop an agent (default: this agent) |
+| `/restart [name\|all]` | Restart an agent (default: this agent; pass `all` for every agent) |
 | `/auth` | Show auth/token status |
 | `/topics` | Show topic-to-agent mappings |
-| `/logs <name> [lines]` | Show agent logs (default: 20 lines, max: 200) |
+| `/logs [name] [lines]` | Show agent logs (default: this agent, 20 lines, max: 200). `/logs 50` works too. |
 | `/memory <query>` | Search agent memory |
+| `/reconcile [name\|all]` | Re-apply clerk.yaml + restart (default: this agent) |
+| `/permissions [agent]` | Show allow/deny list (default: this agent) |
+| `/grant <tool>` / `/grant <agent> <tool>` | Grant a tool permission and reconcile (default: this agent) |
+| `/dangerous [off]` / `/dangerous <agent> [off]` | Toggle full tool access (default: this agent) |
 | `/clerkhelp` | List all available clerk bot commands |
 
 ### How it works
@@ -258,4 +264,4 @@ Tests cover:
 
 ## Use case: multi-agent orchestration
 
-In a Clerk multi-agent setup, each agent instance can run this plugin with a different `TELEGRAM_TOPIC_ID`, routing each forum topic to a dedicated agent while sharing a single bot token and group chat.
+In a Clerk multi-agent setup, each agent instance runs this plugin with its **own bot token** (one bot per agent — Telegram's `getUpdates` long-poll holds an exclusive lock per token, so sharing a token between processes drops messages at random) and its own `TELEGRAM_TOPIC_ID`, routing each forum topic in a shared group to a dedicated agent.
