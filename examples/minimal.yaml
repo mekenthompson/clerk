@@ -1,5 +1,5 @@
 # clerk.yaml — Minimal single-agent setup
-# One bot, one agent, two lines per agent.
+# One bot, one agent. The clerk-telegram fork is the default.
 
 clerk:
   version: 1
@@ -14,9 +14,6 @@ memory:
 
 defaults:
   model: claude-sonnet-4-6
-  channels:
-    telegram:
-      plugin: clerk
   tools:
     allow: [all]
 

@@ -35,10 +35,15 @@ import type { AgentConfig, AgentDefaults, AgentHooks, Profile } from "./schema.j
  * Reads `channels.telegram.plugin`:
  *   - "clerk"    → load the fork via --dangerously-load-development-channels
  *   - "official" → use the upstream marketplace plugin
- *   - unset      → upstream marketplace plugin (default)
+ *   - unset      → clerk fork (default — the fork provides streaming,
+ *                   reactions, history, formatting, and access control
+ *                   that the upstream plugin lacks)
+ *
+ * Users who explicitly want the upstream plugin can set
+ * `channels.telegram.plugin: official`.
  */
 export function usesClerkTelegramPlugin(agent: AgentConfig): boolean {
-  return agent.channels?.telegram?.plugin === "clerk";
+  return agent.channels?.telegram?.plugin !== "official";
 }
 
 /**

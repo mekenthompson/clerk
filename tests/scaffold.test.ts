@@ -75,7 +75,8 @@ describe("scaffoldAgent", () => {
     expect(startSh).toContain("$NVM_DIR/nvm.sh");
     expect(startSh).toContain(`CLAUDE_CONFIG_DIR="${result.agentDir}/.claude"`);
     expect(startSh).toContain(`TELEGRAM_STATE_DIR="${result.agentDir}/telegram"`);
-    expect(startSh).toContain("exec claude --channels plugin:telegram@claude-plugins-official");
+    // Default is the clerk fork (loaded via --dangerously-load-development-channels)
+    expect(startSh).toContain("exec claude --dangerously-load-development-channels server:clerk-telegram");
     expect(startSh).not.toContain("TELEGRAM_TOPIC_ID");
     // CLERK_AGENT_NAME is the canonical "which agent am I" identifier the
     // telegram-plugin reads to detect self-restart commands. Must be set.
@@ -266,15 +267,16 @@ describe("scaffoldAgent", () => {
     expect(settings.skipDangerousModePermissionPrompt).toBeUndefined();
   });
 
-  it("does not include clerk-telegram MCP server in settings.json", () => {
+  it("does not include clerk-telegram MCP server in settings.json (it lives in .mcp.json)", () => {
+    // The clerk fork loads via --dangerously-load-development-channels
+    // which reads from .mcp.json, not settings.json. Verify it doesn't
+    // leak into settings.json.
     const config = makeAgentConfig();
     const result = scaffoldAgent("plugin-agent", config, tmpDir, telegramConfig);
     const settings = JSON.parse(
       readFileSync(join(result.agentDir, ".claude", "settings.json"), "utf-8"),
     );
 
-    // Each agent uses the official plugin:telegram@claude-plugins-official
-    // No shared MCP server for Telegram
     expect(settings.mcpServers?.["clerk-telegram"]).toBeUndefined();
   });
 

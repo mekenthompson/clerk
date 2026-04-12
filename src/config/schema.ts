@@ -98,10 +98,12 @@ export const AgentHooksSchema = z
  * each channel lives under its own key with channel-specific options.
  *
  * Telegram options:
- *  - plugin: "clerk" enables the forked clerk-telegram MCP (loaded via
- *    --dangerously-load-development-channels). "official" uses the
- *    upstream plugin:telegram@claude-plugins-official marketplace
- *    plugin. Unset → behaves like "official".
+ *  - plugin: "clerk" (default) uses the enhanced clerk-telegram MCP
+ *    with streaming edits, emoji reactions, SQLite history, formatted
+ *    output, and per-agent access control. Loaded via
+ *    --dangerously-load-development-channels. "official" falls back to
+ *    the upstream plugin:telegram@claude-plugins-official marketplace
+ *    plugin (basic send/receive only).
  *  - format: default reply format for the channel. Passed to the
  *    plugin via env var. "html" (default) auto-converts markdown.
  *  - rate_limit_ms: minimum delay between outgoing messages.
@@ -116,8 +118,10 @@ export const TelegramChannelSchema = z
       .enum(["clerk", "official"])
       .optional()
       .describe(
-        "Which Telegram MCP plugin to load. 'clerk' = fork with enhanced " +
-        "streaming/reactions/history. 'official' = marketplace plugin."
+        "Which Telegram MCP plugin to load. Default is 'clerk' — the " +
+        "enhanced fork with streaming edits, reactions, history, and " +
+        "access control. Set to 'official' for the upstream marketplace " +
+        "plugin (basic send/receive only)."
       ),
     format: z
       .enum(["html", "markdownv2", "text"])
