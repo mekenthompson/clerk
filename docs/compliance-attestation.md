@@ -55,10 +55,23 @@ Clerk never touches, reads, or proxies the access token, refresh token, or any a
 
 **Source:** [Plugins - Claude Code Docs](https://code.claude.com/docs/en/plugins); [Channels - Claude Code Docs](https://code.claude.com/docs/en/channels)
 
-**Clerk's compliance:** Each agent uses `claude --channels plugin:telegram@claude-plugins-official` — the official, Anthropic-approved Telegram plugin from the marketplace. Clerk does not use a custom or forked channel. Each agent:
+**Clerk's compliance:** By default, each agent uses `claude --channels plugin:telegram@claude-plugins-official` — the official, Anthropic-approved Telegram plugin from the marketplace. Clerk does not modify the official plugin. Each agent:
 - Gets its own Telegram bot token in `telegram/.env`
 - Uses the official plugin's access.json format for group configuration
 - Runs the plugin exactly as Anthropic intended, with no modifications
+
+### 3. Optional Clerk-Enhanced Plugin (Development Channel)
+
+Clerk also ships an optional forked Telegram plugin, enabled per-agent via `use_clerk_plugin: true` in `clerk.yaml`. When enabled, the agent launches with `claude --dangerously-load-development-channels server:clerk-telegram` — Claude Code's documented mechanism for loading unpublished channels during development.
+
+**Source:** [Channels - Claude Code Docs](https://code.claude.com/docs/en/channels)
+
+**Clerk's compliance:** The enhanced plugin is a standard MCP server loaded via the first-party `--dangerously-load-development-channels` flag. It does not:
+- Modify the `claude` binary
+- Intercept authentication, OAuth tokens, or inference requests
+- Route subscription credentials through any intermediary
+
+Like the official plugin, it polls Telegram with the agent's own bot token and hands messages to Claude Code via the documented channel protocol. It adds HTML formatting, smart chunking, message coalescing, bot commands, and pre-approved MCP permissions — all client-side message-handling concerns. Operators who want to stay strictly on Anthropic-published code should leave `use_clerk_plugin` off (the default).
 
 ### 4. MCP Servers Are Explicitly Supported
 
