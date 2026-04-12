@@ -3,6 +3,13 @@ import { z } from "zod";
 export const ScheduleEntrySchema = z.object({
   cron: z.string().describe("Cron expression (e.g., '0 8 * * *')"),
   prompt: z.string().describe("Prompt to send at the scheduled time"),
+  model: z
+    .string()
+    .optional()
+    .describe(
+      "Model for this task. Defaults to claude-sonnet-4-6 (cheap, fast). " +
+      "Use claude-opus-4-6 for tasks needing complex reasoning.",
+    ),
 });
 
 export const AgentSoulSchema = z

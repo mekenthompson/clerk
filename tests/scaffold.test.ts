@@ -1603,6 +1603,129 @@ describe("phase-6b bug fixes", () => {
   });
 });
 
+describe("scheduled task cron script generation", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "clerk-cron-"));
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("generates cron-N.sh scripts for each schedule entry", () => {
+    const agentConfig = makeAgentConfig({
+      schedule: [
+        { cron: "0 8 * * *", prompt: "Morning briefing" },
+        { cron: "0 20 * * 0", prompt: "Weekly review" },
+      ],
+    });
+    const result = scaffoldAgent(
+      "cron-agent",
+      agentConfig,
+      tmpDir,
+      telegramConfig,
+    );
+
+    const script0 = join(result.agentDir, "telegram", "cron-0.sh");
+    const script1 = join(result.agentDir, "telegram", "cron-1.sh");
+    expect(existsSync(script0)).toBe(true);
+    expect(existsSync(script1)).toBe(true);
+
+    const content = readFileSync(script0, "utf-8");
+    expect(content).toContain("claude -p");
+    expect(content).toContain("Morning briefing");
+    expect(content).toContain("--model");
+    expect(content).toContain("claude-sonnet-4-6"); // default model
+    expect(content).toContain("--no-session-persistence");
+  });
+
+  it("uses the configured model when specified", () => {
+    const agentConfig = makeAgentConfig({
+      schedule: [
+        { cron: "0 9 * * *", prompt: "Important analysis", model: "claude-opus-4-6" },
+      ],
+    });
+    const result = scaffoldAgent(
+      "model-cron",
+      agentConfig,
+      tmpDir,
+      telegramConfig,
+    );
+
+    const content = readFileSync(
+      join(result.agentDir, "telegram", "cron-0.sh"),
+      "utf-8",
+    );
+    expect(content).toContain("claude-opus-4-6");
+    expect(content).not.toContain("claude-sonnet-4-6");
+  });
+
+  it("reconcile regenerates cron scripts when prompt changes", () => {
+    const initial = makeAgentConfig({
+      schedule: [{ cron: "0 8 * * *", prompt: "v1 prompt" }],
+    });
+    const clerkConfig: ClerkConfig = {
+      clerk: { version: 1, agents_dir: tmpDir },
+      telegram: telegramConfig,
+      agents: { "cron-rec": initial },
+    } as ClerkConfig;
+    scaffoldAgent("cron-rec", initial, tmpDir, telegramConfig, clerkConfig);
+
+    const scriptPath = join(tmpDir, "cron-rec", "telegram", "cron-0.sh");
+    expect(readFileSync(scriptPath, "utf-8")).toContain("v1 prompt");
+
+    const updated = makeAgentConfig({
+      schedule: [{ cron: "0 8 * * *", prompt: "v2 prompt updated" }],
+    });
+    const updatedConfig: ClerkConfig = {
+      ...clerkConfig,
+      agents: { "cron-rec": updated },
+    } as ClerkConfig;
+    const result = reconcileAgent("cron-rec", updated, tmpDir, telegramConfig, updatedConfig);
+
+    expect(result.changes).toContain(scriptPath);
+    expect(readFileSync(scriptPath, "utf-8")).toContain("v2 prompt updated");
+  });
+
+  it("schedule entries from defaults cascade into cron scripts", () => {
+    const agentConfig = makeAgentConfig({
+      schedule: [{ cron: "0 17 * * *", prompt: "Agent evening check" }],
+    });
+    const clerkConfig: ClerkConfig = {
+      clerk: { version: 1, agents_dir: tmpDir },
+      telegram: telegramConfig,
+      defaults: {
+        schedule: [{ cron: "0 8 * * *", prompt: "Global morning briefing" }],
+      },
+      agents: { "cascade-cron": agentConfig },
+    } as ClerkConfig;
+
+    const result = scaffoldAgent(
+      "cascade-cron",
+      agentConfig,
+      tmpDir,
+      telegramConfig,
+      clerkConfig,
+    );
+
+    // Defaults schedule is prepended — cron-0 is the global entry
+    const script0 = readFileSync(
+      join(result.agentDir, "telegram", "cron-0.sh"),
+      "utf-8",
+    );
+    expect(script0).toContain("Global morning briefing");
+
+    // cron-1 is the agent's own entry
+    const script1 = readFileSync(
+      join(result.agentDir, "telegram", "cron-1.sh"),
+      "utf-8",
+    );
+    expect(script1).toContain("Agent evening check");
+  });
+});
+
 describe("sub-agent file generation", () => {
   let tmpDir: string;
 
