@@ -15,7 +15,14 @@ import {
   attachAgent,
   getAgentLogs,
 } from "../agents/lifecycle.js";
-import { generateUnit, installUnit, uninstallUnit } from "../agents/systemd.js";
+import {
+  generateUnit,
+  installUnit,
+  uninstallUnit,
+  installScheduleTimers,
+  enableScheduleTimers,
+  daemonReload,
+} from "../agents/systemd.js";
 
 /**
  * Pre-restart preflight check. Verifies the agent's runtime
@@ -265,6 +272,15 @@ export function registerAgentCommand(program: Command): void {
         const useAutoaccept = agentConfig.channels?.telegram?.plugin === "clerk";
         const unitContent = generateUnit(name, agentDir, useAutoaccept);
         installUnit(name, unitContent);
+
+        // Install schedule timers if the agent has any
+        const schedule = agentConfig.schedule ?? [];
+        if (schedule.length > 0) {
+          installScheduleTimers(name, agentDir, schedule);
+          daemonReload();
+          enableScheduleTimers(name, schedule.length);
+          console.log(chalk.green(`  ${schedule.length} scheduled timer(s) installed`));
+        }
 
         console.log(chalk.green(`  Agent "${name}" scaffolded at ${agentDir}`));
         console.log(chalk.green(`  Systemd unit installed: clerk-${name}.service`));

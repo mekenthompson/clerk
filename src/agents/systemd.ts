@@ -1,7 +1,7 @@
 import { execSync } from "node:child_process";
-import { writeFileSync, mkdirSync, unlinkSync, existsSync } from "node:fs";
-import { resolve } from "node:path";
-import type { ClerkConfig } from "../config/schema.js";
+import { writeFileSync, readFileSync, mkdirSync, unlinkSync, existsSync, readdirSync } from "node:fs";
+import { resolve, join } from "node:path";
+import type { ClerkConfig, ScheduleEntry } from "../config/schema.js";
 import { resolveAgentsDir } from "../config/loader.js";
 
 const SYSTEMD_USER_DIR = resolve(
@@ -82,5 +82,174 @@ export function daemonReload(): void {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     throw new Error(`Failed to reload systemd user daemon: ${message}`);
+  }
+}
+
+// ─── Scheduled task timers ─────────────────────────────────────────────────
+
+const DOW_MAP: Record<string, string> = {
+  "0": "Sun", "7": "Sun", "1": "Mon", "2": "Tue", "3": "Wed",
+  "4": "Thu", "5": "Fri", "6": "Sat",
+};
+
+// Convert a standard 5-field cron expression to a systemd OnCalendar
+// value. Supports: exact values, wildcards, ranges (1-5), step values,
+// and comma-separated lists.
+//
+// Examples:
+//   "0 8 * * *"     → "*-*-* 08:00:00"
+//   "0 8 * * 1-5"   → "Mon..Fri *-*-* 08:00:00"
+//   "30 9 * * 0,6"  → "Sat,Sun *-*-* 09:30:00"
+export function cronToOnCalendar(cron: string): string {
+  const parts = cron.trim().split(/\s+/);
+  if (parts.length !== 5) {
+    throw new Error(`Invalid cron expression (expected 5 fields): ${cron}`);
+  }
+  const [minute, hour, dom, month, dow] = parts;
+
+  // Day-of-week → systemd format
+  let dowPrefix = "";
+  if (dow !== "*") {
+    const converted = dow.split(",").map(segment => {
+      const range = segment.match(/^(\d)-(\d)$/);
+      if (range) {
+        const from = DOW_MAP[range[1]] ?? range[1];
+        const to = DOW_MAP[range[2]] ?? range[2];
+        return `${from}..${to}`;
+      }
+      return DOW_MAP[segment] ?? segment;
+    }).join(",");
+    dowPrefix = `${converted} `;
+  }
+
+  // Month
+  const monthPart = month === "*" ? "*" : month.padStart(2, "0");
+
+  // Day-of-month
+  const domPart = dom === "*" ? "*" : dom.padStart(2, "0");
+
+  // Hour — handle */N step
+  let hourPart: string;
+  const hourStep = hour.match(/^\*\/(\d+)$/);
+  if (hourStep) {
+    hourPart = `00/${hourStep[1]}`;
+  } else {
+    hourPart = hour === "*" ? "*" : hour.padStart(2, "0");
+  }
+
+  // Minute — handle */N step
+  let minutePart: string;
+  const minStep = minute.match(/^\*\/(\d+)$/);
+  if (minStep) {
+    minutePart = `00/${minStep[1]}`;
+  } else {
+    minutePart = minute === "*" ? "*" : minute.padStart(2, "0");
+  }
+
+  return `${dowPrefix}*-${monthPart}-${domPart} ${hourPart}:${minutePart}:00`;
+}
+
+/**
+ * Generate a systemd .timer unit for a scheduled task.
+ */
+export function generateTimerUnit(
+  agentName: string,
+  index: number,
+  cronExpr: string,
+  prompt: string,
+): string {
+  const onCalendar = cronToOnCalendar(cronExpr);
+  const desc = prompt.length > 60 ? prompt.slice(0, 57) + "..." : prompt;
+  return `[Unit]
+Description=clerk scheduled: ${agentName} #${index} — ${desc}
+
+[Timer]
+OnCalendar=${onCalendar}
+Persistent=true
+RandomizedDelaySec=30
+
+[Install]
+WantedBy=timers.target
+`;
+}
+
+/**
+ * Generate a systemd .service unit for a scheduled task (oneshot).
+ */
+export function generateTimerServiceUnit(
+  agentName: string,
+  index: number,
+  agentDir: string,
+): string {
+  const scriptPath = join(agentDir, "telegram", `cron-${index}.sh`);
+  return `[Unit]
+Description=clerk scheduled task: ${agentName} #${index}
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash ${scriptPath}
+WorkingDirectory=${agentDir}
+`;
+}
+
+/**
+ * Timer unit file path for a scheduled task.
+ */
+function timerFilePath(agentName: string, index: number): string {
+  return resolve(SYSTEMD_USER_DIR, `clerk-${agentName}-cron-${index}.timer`);
+}
+
+function timerServiceFilePath(agentName: string, index: number): string {
+  return resolve(SYSTEMD_USER_DIR, `clerk-${agentName}-cron-${index}.service`);
+}
+
+/**
+ * Install timer + service units for all scheduled tasks of an agent.
+ * Also removes stale timers that no longer have a corresponding
+ * schedule entry (e.g. user removed a schedule from clerk.yaml).
+ */
+export function installScheduleTimers(
+  agentName: string,
+  agentDir: string,
+  schedule: ScheduleEntry[],
+): void {
+  mkdirSync(SYSTEMD_USER_DIR, { recursive: true });
+
+  // Write current timers
+  for (let i = 0; i < schedule.length; i++) {
+    const entry = schedule[i];
+    const timerContent = generateTimerUnit(agentName, i, entry.cron, entry.prompt);
+    const serviceContent = generateTimerServiceUnit(agentName, i, agentDir);
+    writeFileSync(timerFilePath(agentName, i), timerContent, { mode: 0o644 });
+    writeFileSync(timerServiceFilePath(agentName, i), serviceContent, { mode: 0o644 });
+  }
+
+  // Remove stale timers (indices beyond current schedule length)
+  const prefix = `clerk-${agentName}-cron-`;
+  if (existsSync(SYSTEMD_USER_DIR)) {
+    for (const file of readdirSync(SYSTEMD_USER_DIR)) {
+      if (!file.startsWith(prefix)) continue;
+      const match = file.match(new RegExp(`^${prefix}(\\d+)\\.(timer|service)$`));
+      if (match && parseInt(match[1], 10) >= schedule.length) {
+        const stale = resolve(SYSTEMD_USER_DIR, file);
+        // Stop the timer before removing
+        try {
+          execSync(`systemctl --user stop ${file}`, { stdio: "pipe" });
+        } catch { /* may not be running */ }
+        unlinkSync(stale);
+      }
+    }
+  }
+}
+
+/**
+ * Enable and start all schedule timers for an agent.
+ */
+export function enableScheduleTimers(agentName: string, count: number): void {
+  for (let i = 0; i < count; i++) {
+    const timerName = `clerk-${agentName}-cron-${i}.timer`;
+    try {
+      execSync(`systemctl --user enable --now ${timerName}`, { stdio: "pipe" });
+    } catch { /* best effort */ }
   }
 }

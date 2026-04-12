@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { generateUnit } from "../src/agents/systemd.js";
+import {
+  generateUnit,
+  cronToOnCalendar,
+  generateTimerUnit,
+  generateTimerServiceUnit,
+} from "../src/agents/systemd.js";
 
 describe("generateUnit", () => {
   it("generates valid unit file content", () => {
@@ -81,5 +86,71 @@ describe("generateUnit", () => {
     expect(unit).not.toContain("autoaccept.exp");
     expect(unit).not.toContain("/usr/bin/expect");
     expect(unit).toContain("/bin/bash");
+  });
+});
+
+describe("cronToOnCalendar", () => {
+  it("converts a simple daily cron", () => {
+    expect(cronToOnCalendar("0 8 * * *")).toBe("*-*-* 08:00:00");
+  });
+
+  it("converts weekday range", () => {
+    expect(cronToOnCalendar("0 8 * * 1-5")).toBe("Mon..Fri *-*-* 08:00:00");
+  });
+
+  it("converts comma-separated days of week", () => {
+    // cron: 0=Sunday, 6=Saturday → Sun,Sat in systemd order
+    expect(cronToOnCalendar("30 9 * * 0,6")).toBe("Sun,Sat *-*-* 09:30:00");
+  });
+
+  it("converts minute step value", () => {
+    const result = cronToOnCalendar("*/15 * * * *");
+    expect(result).toBe("*-*-* *:00/15:00");
+  });
+
+  it("converts hour step value", () => {
+    const result = cronToOnCalendar("0 */2 * * *");
+    expect(result).toBe("*-*-* 00/2:00:00");
+  });
+
+  it("pads single-digit minute and hour", () => {
+    expect(cronToOnCalendar("5 9 * * *")).toBe("*-*-* 09:05:00");
+  });
+
+  it("throws on invalid cron with wrong number of fields", () => {
+    expect(() => cronToOnCalendar("0 8 * *")).toThrow("expected 5 fields");
+    expect(() => cronToOnCalendar("0 8 * * * *")).toThrow("expected 5 fields");
+  });
+});
+
+describe("generateTimerUnit", () => {
+  it("generates a valid timer with OnCalendar", () => {
+    const timer = generateTimerUnit("coach", 0, "0 8 * * *", "Morning check-in");
+    expect(timer).toContain("[Timer]");
+    expect(timer).toContain("OnCalendar=*-*-* 08:00:00");
+    expect(timer).toContain("Persistent=true");
+    expect(timer).toContain("coach #0");
+    expect(timer).toContain("Morning check-in");
+  });
+
+  it("truncates long prompts in the description", () => {
+    const longPrompt = "A".repeat(100);
+    const timer = generateTimerUnit("agent", 0, "0 9 * * *", longPrompt);
+    expect(timer).toContain("...");
+    expect(timer.length).toBeLessThan(timer.length + 100);
+  });
+});
+
+describe("generateTimerServiceUnit", () => {
+  it("generates a oneshot service pointing at the cron script", () => {
+    const service = generateTimerServiceUnit("coach", 0, "/home/user/.clerk/agents/coach");
+    expect(service).toContain("Type=oneshot");
+    expect(service).toContain("cron-0.sh");
+    expect(service).toContain("WorkingDirectory=/home/user/.clerk/agents/coach");
+  });
+
+  it("uses the correct index in the script path", () => {
+    const service = generateTimerServiceUnit("agent", 3, "/tmp/agents/agent");
+    expect(service).toContain("cron-3.sh");
   });
 });
