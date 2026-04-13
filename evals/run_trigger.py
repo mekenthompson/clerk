@@ -113,6 +113,7 @@ async def run_single(
     eval_item: dict,
     model: str,
     run_index: int,
+    timeout: int = 180,
 ) -> dict:
     # Put routing instructions IN the user prompt — claude -p ignores
     # --system-prompt in practice (it gets overridden by Claude Code's
@@ -124,6 +125,7 @@ async def run_single(
     response_text = await call_claude(
         combined_prompt,
         model,
+        timeout=timeout,
     )
     selected = parse_selected_skill(response_text)
 
@@ -151,17 +153,18 @@ async def run_eval_multi(
     model: str,
     runs: int,
     semaphore: asyncio.Semaphore,
+    timeout: int = 180,
 ) -> list[dict]:
     async def bounded(run_idx):
         async with semaphore:
-            return await run_single(eval_item, model, run_idx)
+            return await run_single(eval_item, model, run_idx, timeout=timeout)
 
     return await asyncio.gather(*[bounded(i) for i in range(runs)])
 
 
-async def run_all(evals: list[dict], model: str, runs: int, parallel: int) -> list[dict]:
+async def run_all(evals: list[dict], model: str, runs: int, parallel: int, timeout: int = 180) -> list[dict]:
     semaphore = asyncio.Semaphore(parallel)
-    tasks = [run_eval_multi(e, model, runs, semaphore) for e in evals]
+    tasks = [run_eval_multi(e, model, runs, semaphore, timeout=timeout) for e in evals]
     batches = await asyncio.gather(*tasks)
     return [r for batch in batches for r in batch]
 
@@ -173,6 +176,7 @@ def main():
     parser.add_argument("--runs", type=int, default=1, help="Runs per eval (for flakiness detection)")
     parser.add_argument("--filter", help="Filter evals by expected_skill or tag")
     parser.add_argument("--dataset", default=str(EVALS_DIR / "trigger_dataset.yaml"))
+    parser.add_argument("--timeout", type=int, default=180, help="Per-call timeout in seconds")
     args = parser.parse_args()
 
     dataset = yaml.safe_load(Path(args.dataset).read_text())
@@ -187,7 +191,7 @@ def main():
 
     print(f"Running {len(evals)} trigger evals x{args.runs} runs (parallel={args.parallel})")
 
-    results = asyncio.run(run_all(evals, args.model, args.runs, args.parallel))
+    results = asyncio.run(run_all(evals, args.model, args.runs, args.parallel, args.timeout))
 
     passed = sum(1 for r in results if r["passed"])
     total = len(results)

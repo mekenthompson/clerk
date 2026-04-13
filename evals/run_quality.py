@@ -104,6 +104,7 @@ async def run_eval(
     eval_item: dict,
     model: str,
     with_skill: bool,
+    timeout: int = 180,
 ) -> dict:
     skill_name = eval_item.get("primary_skill", "")
     skill_content = load_skill_content(skill_name) if with_skill else ""
@@ -113,6 +114,7 @@ async def run_eval(
         model,
         system_prompt=skill_content if skill_content else None,
         append_system=True,
+        timeout=timeout,
     )
 
     passed, matched, missed = check_assertions(
@@ -139,12 +141,13 @@ async def run_all(
     model: str,
     parallel: int,
     ablation: bool,
+    timeout: int = 180,
 ) -> list[dict]:
     semaphore = asyncio.Semaphore(parallel)
 
     async def bounded(eval_item, with_skill):
         async with semaphore:
-            return await run_eval(eval_item, model, with_skill)
+            return await run_eval(eval_item, model, with_skill, timeout=timeout)
 
     tasks = []
     for e in evals:
@@ -162,6 +165,7 @@ def main():
     parser.add_argument("--ablation", action="store_true", help="Also run without skill")
     parser.add_argument("--filter", help="Filter evals by skill name or tag")
     parser.add_argument("--dataset", default=str(EVALS_DIR / "dataset.yaml"))
+    parser.add_argument("--timeout", type=int, default=180, help="Per-call timeout in seconds")
     args = parser.parse_args()
 
     dataset = yaml.safe_load(Path(args.dataset).read_text())
@@ -176,7 +180,7 @@ def main():
 
     print(f"Running {len(evals)} evals (ablation={args.ablation}, parallel={args.parallel})")
 
-    results = asyncio.run(run_all(evals, args.model, args.parallel, args.ablation))
+    results = asyncio.run(run_all(evals, args.model, args.parallel, args.ablation, args.timeout))
 
     passed = sum(1 for r in results if r["passed"])
     total = len(results)
