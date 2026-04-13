@@ -240,7 +240,10 @@ export async function handleStreamReply(
     await stream.finalize()
     state.activeDraftStreams.delete(sKey)
     state.activeDraftParseModes?.delete(sKey)
-    deps.endStatusReaction(chat_id, threadId, 'done')
+    // Intentionally NOT firing the terminal 👍 here. A turn can call
+    // stream_reply(done=true) mid-flight and then do more tool work or
+    // send additional replies. The 👍 now fires only from turn_end in
+    // server.ts, which is the true agent-idle boundary.
 
     if (deps.historyEnabled) {
       const finalId = stream.getMessageId()
