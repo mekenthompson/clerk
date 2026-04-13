@@ -1355,9 +1355,14 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           }
         }
 
-        // Final reply landed — mark the status reaction controller done so
-        // the user's inbound message gets the 👍 terminal emoji.
-        endStatusReaction(chat_id, threadId, 'done')
+        // Intentionally NOT firing the terminal 👍 here. A single turn
+        // can call `reply` multiple times (progress notes, chunks of a
+        // long answer, etc.) and also continue doing tool work after a
+        // reply. Firing 'done' here caused the user's inbound message
+        // to show 👍 while the agent was still thinking. The 👍 now
+        // fires only from `turn_end` (below), which is the actual
+        // agent-idle boundary. Orphaned-reply path fires its own setDone
+        // from the backstop.
 
         // Note: draft-stream claim happens at the START of this handler
         // (see the "Draft-stream handoff" block above), so no post-send

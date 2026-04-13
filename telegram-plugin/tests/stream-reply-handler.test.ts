@@ -128,7 +128,11 @@ describe('handleStreamReply', () => {
     expect(deps.takeHandoffPrefix).toHaveBeenCalledTimes(1)
   })
 
-  it('done=true finalizes, deletes from map, calls endStatusReaction', async () => {
+  it('done=true finalizes and deletes from map (does NOT fire terminal reaction)', async () => {
+    // Pins the intentional non-behavior: stream_reply(done=true) must NOT
+    // fire the 👍 terminal reaction. That is now the exclusive job of
+    // server.ts's turn_end handler, because a turn can call
+    // stream_reply(done=true) mid-flight and then continue working.
     const state = makeState()
     const endStatusReaction = vi.fn()
     const deps = makeDeps(bot, { endStatusReaction })
@@ -143,7 +147,7 @@ describe('handleStreamReply', () => {
 
     expect(result.status).toBe('finalized')
     expect(state.activeDraftStreams.size).toBe(0)
-    expect(endStatusReaction).toHaveBeenCalledWith('1', undefined, 'done')
+    expect(endStatusReaction).not.toHaveBeenCalled()
   })
 
   it('done=true with historyEnabled records the final message row', async () => {
