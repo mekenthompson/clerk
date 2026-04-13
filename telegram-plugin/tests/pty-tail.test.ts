@@ -1,6 +1,9 @@
 import { describe, it, expect } from 'vitest'
 import { Terminal } from '@xterm/headless'
-import { V1Extractor } from '../pty-tail.js'
+import { V1Extractor, V1ToolActivityExtractor, startPtyTail } from '../pty-tail.js'
+import { mkdtempSync, writeFileSync, appendFileSync, rmSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
 
 /**
  * Helper: feed a string into a fresh xterm Terminal and return it after
@@ -278,4 +281,146 @@ describe('V1Extractor against real captured production output', () => {
     expect(result).toMatch(/^Yes — I can attach files to replies/)
     expect(result).toMatch(/along\.$/)
   })
+})
+
+describe('V1ToolActivityExtractor', () => {
+  const ax = new V1ToolActivityExtractor()
+
+  it('returns null for an empty terminal', async () => {
+    const term = await feedToTerm('')
+    expect(ax.extract(term)).toBeNull()
+  })
+
+  it('extracts a Bash tool call as a short status', async () => {
+    const term = await feedToTerm('● Bash(git status)\r\n')
+    expect(ax.extract(term)).toBe('Running Bash: git status')
+  })
+
+  it('extracts a Read tool call', async () => {
+    const term = await feedToTerm('● Read(/home/user/foo.ts)\r\n')
+    expect(ax.extract(term)).toBe('Reading file: /home/user/foo.ts')
+  })
+
+  it('extracts a Grep tool call, keeping only the first arg', async () => {
+    const term = await feedToTerm('● Grep(pattern: "foo", path: "/bar")\r\n')
+    const out = ax.extract(term)
+    expect(out).toMatch(/^Searching with Grep: /)
+    // Must NOT include the second `path:` arg
+    expect(out).not.toContain('/bar')
+  })
+
+  it('returns null for clerk-telegram tool calls (owned by V1Extractor)', async () => {
+    const term = await feedToTerm(
+      '● clerk-telegram - reply (MCP)(chat_id: "1", text: "hi")\r\n',
+    )
+    expect(ax.extract(term)).toBeNull()
+  })
+
+  it('takes the most recent tool call when several are in the buffer', async () => {
+    const tui = [
+      '● Bash(ls)',
+      '  ⎿  output',
+      '● Read(/tmp/a.ts)',
+      '  ⎿  ...',
+      '● Grep(foo)',
+      '',
+    ].join('\r\n')
+    const term = await feedToTerm(tui)
+    expect(ax.extract(term)).toBe('Searching with Grep: foo')
+  })
+
+  it('truncates overlong inner arg', async () => {
+    const longArg = 'x'.repeat(200)
+    const term = await feedToTerm(`● Bash(${longArg})\r\n`, { cols: 400 })
+    const out = ax.extract(term) ?? ''
+    expect(out.length).toBeLessThanOrEqual(120)
+    expect(out.startsWith('Running Bash: ')).toBe(true)
+  })
+
+  it('has a stable version identifier', () => {
+    expect(ax.version).toMatch(/^v1/)
+  })
+
+  it('handles an unknown tool name with a generic verb', async () => {
+    const term = await feedToTerm('● MyCustomTool(xyz)\r\n')
+    expect(ax.extract(term)).toBe('Running MyCustomTool: xyz')
+  })
+})
+
+describe('startPtyTail integration — onActivity wiring + dedup + throttle', () => {
+  it('emits activity lines as tool-call bullets appear, deduping repeats', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pty-activity-'))
+    const logFile = join(dir, 'service.log')
+    writeFileSync(logFile, '')
+
+    const activities: string[] = []
+    const partials: string[] = []
+    const handle = startPtyTail({
+      logFile,
+      throttleMs: 10,
+      onPartial: (t) => { partials.push(t) },
+      activityExtractor: new V1ToolActivityExtractor(),
+      onActivity: (t) => { activities.push(t) },
+    })
+
+    try {
+      // Give the poll loop a chance to attach
+      await new Promise(r => setTimeout(r, 250))
+
+      appendFileSync(logFile, '● Bash(echo hi)\r\n')
+      await new Promise(r => setTimeout(r, 400))
+
+      // Duplicate buffer state → should NOT re-emit
+      appendFileSync(logFile, '  ⎿  hi\r\n')
+      await new Promise(r => setTimeout(r, 400))
+
+      appendFileSync(logFile, '● Read(/tmp/foo.ts)\r\n')
+      await new Promise(r => setTimeout(r, 400))
+
+      expect(activities).toContain('Running Bash: echo hi')
+      expect(activities).toContain('Reading file: /tmp/foo.ts')
+      // Dedup check: 'Running Bash: echo hi' should appear exactly once,
+      // not once per byte-batch.
+      const bashCount = activities.filter(a => a === 'Running Bash: echo hi').length
+      expect(bashCount).toBe(1)
+      // Reply text should not have been emitted — no clerk-telegram marker in the log.
+      expect(partials).toHaveLength(0)
+    } finally {
+      handle.stop()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 10_000)
+
+  it('preserves onPartial reply extraction when onActivity is also wired', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pty-mixed-'))
+    const logFile = join(dir, 'service.log')
+    writeFileSync(logFile, '')
+
+    const activities: string[] = []
+    const partials: string[] = []
+    const handle = startPtyTail({
+      logFile,
+      throttleMs: 10,
+      onPartial: (t) => { partials.push(t) },
+      activityExtractor: new V1ToolActivityExtractor(),
+      onActivity: (t) => { activities.push(t) },
+    })
+
+    try {
+      await new Promise(r => setTimeout(r, 250))
+      appendFileSync(logFile, '● Bash(ls)\r\n')
+      await new Promise(r => setTimeout(r, 300))
+      appendFileSync(
+        logFile,
+        '● clerk-telegram - reply (MCP)(chat_id: "1", text: "hello world")\r\n',
+      )
+      await new Promise(r => setTimeout(r, 400))
+
+      expect(activities).toContain('Running Bash: ls')
+      expect(partials.some(p => p.includes('hello world'))).toBe(true)
+    } finally {
+      handle.stop()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 10_000)
 })

@@ -157,14 +157,20 @@ export function createDraftStream(
       const msg = (err as Error).message ?? String(err)
       // "message is not modified" — the new text equals the current
       // server-side text. Treat as success.
-      if (/not modified/i.test(msg)) {
+      //
+      // NOTE: the regexes below are intentionally anchored to the EXACT
+      // Telegram Bot API error strings (via word boundaries and the
+      // "message" prefix). Earlier versions matched /not modified/i and
+      // /not found/i anywhere in the message, which would misclassify
+      // unrelated errors like "chat not found" or "thread not found" as
+      // recoverable and silently drop them.
+      if (/\bmessage is not modified\b/i.test(msg)) {
         lastSentText = textToSend
         lastSentAt = Date.now()
         log?.(`stream → not modified (id: ${messageId})`)
       } else if (
-        /message to edit not found/i.test(msg)
-        || /message_id_invalid/i.test(msg)
-        || /MESSAGE_ID_INVALID/.test(msg)
+        /\bmessage to edit not found\b/i.test(msg)
+        || /\bMESSAGE_ID_INVALID\b/i.test(msg)
       ) {
         // The preview was deleted by the user (or Telegram) between send
         // and edit. Clear the captured id + lastSentText and requeue the
