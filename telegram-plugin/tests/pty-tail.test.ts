@@ -482,4 +482,44 @@ describe('shouldSuppressToolActivity (bug 2: suppress noisy per-tool narration)'
     // All four were noisy-core-tool narration → outbound must be empty.
     expect(outbound).toEqual([])
   })
+
+  it('regression: suppresses spinner-verb prefixes (Reading/Writing/Editing/Searching)', () => {
+    // Real production leak: Claude Code's in-progress spinner uses bare
+    // verbs ("Reading…", "Writing…") which the bullet-line regex captures
+    // as the tool token. activityVerb falls through to default
+    // `Running ${tool}`, producing "Running Reading: ctrl+o to expand"
+    // and friends. Prior suppression list (formatted "Reading file"
+    // prefix only) missed these. Pin the fix.
+    expect(shouldSuppressToolActivity('Running Reading: ctrl+o to expand')).toBe(true)
+    expect(shouldSuppressToolActivity('Running Writing: ctrl+o to expand')).toBe(true)
+    expect(shouldSuppressToolActivity('Running Editing: foo.ts')).toBe(true)
+    expect(shouldSuppressToolActivity('Running Searching: pattern')).toBe(true)
+    // Also the short tool-token aliases ("Read"/"Write"/"Edit") that the
+    // generic default verb produces when the bullet line shows "● Read".
+    expect(shouldSuppressToolActivity('Running Read: foo.ts')).toBe(true)
+    expect(shouldSuppressToolActivity('Running Write: bar.md')).toBe(true)
+    expect(shouldSuppressToolActivity('Running Edit: baz.ts')).toBe(true)
+    expect(shouldSuppressToolActivity('Running Grep: pat')).toBe(true)
+    expect(shouldSuppressToolActivity('Running Glob: **/*.ts')).toBe(true)
+  })
+
+  it('suppresses any line carrying a Claude Code TUI keyboard hint', () => {
+    // The Telegram user cannot press ctrl+o, esc, shift+tab — surfacing
+    // these hints in the activity lane is confusing UX (they tap and
+    // nothing happens). Drop the line regardless of which tool prefix
+    // dressed it up.
+    expect(shouldSuppressToolActivity('Running sub-agent: ctrl+o to expand')).toBe(true)
+    expect(shouldSuppressToolActivity('Fetching URL: esc to interrupt')).toBe(true)
+    expect(shouldSuppressToolActivity('Running MyCustomTool: shift+tab to cycle')).toBe(true)
+    expect(shouldSuppressToolActivity('Doing thing (Ctrl+O to expand)')).toBe(true) // case-insensitive
+    expect(shouldSuppressToolActivity('Doing thing alt+enter to send')).toBe(true)
+  })
+
+  it('still passes clean human-meaningful activity through', () => {
+    // Make sure the broadened filter didn't over-trigger on normal lines.
+    expect(shouldSuppressToolActivity('Running sub-agent: @researcher')).toBe(false)
+    expect(shouldSuppressToolActivity('Fetching URL: https://example.com')).toBe(false)
+    expect(shouldSuppressToolActivity('Searching the web: claude api')).toBe(false)
+    expect(shouldSuppressToolActivity('Running MyCustomTool: payload')).toBe(false)
+  })
 })
