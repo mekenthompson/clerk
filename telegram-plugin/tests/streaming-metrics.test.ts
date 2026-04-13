@@ -28,6 +28,23 @@ afterEach(() => {
   else process.env.CLERK_STREAMING_METRICS = originalFlag
 })
 
+describe('logStreamingEvent — stderr failure', () => {
+  it('swallows write errors so the host never breaks', () => {
+    process.env.CLERK_STREAMING_METRICS = '1'
+    const boom = () => {
+      throw new Error('stderr broken')
+    }
+    process.stderr.write = boom as unknown as typeof process.stderr.write
+    // Must not throw.
+    expect(() => logStreamingEvent({
+      kind: 'turn_end',
+      chatId: 'c1',
+      durationMs: 1,
+      suppressClearedCount: 0,
+    })).not.toThrow()
+  })
+})
+
 describe('logStreamingEvent — env gate', () => {
   it('is a no-op when CLERK_STREAMING_METRICS is unset', () => {
     delete process.env.CLERK_STREAMING_METRICS

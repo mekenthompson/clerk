@@ -13,5 +13,18 @@ export default defineConfig({
       "**/dist/**",
       "**/telegram-plugin/tests/history.test.ts",
     ],
+    coverage: {
+      provider: "v8",
+      reporter: ["text", "json-summary"],
+      include: ["telegram-plugin/**"],
+      exclude: [
+        "telegram-plugin/tests/**",
+        "telegram-plugin/server.ts",
+        "telegram-plugin/start.ts",
+        "telegram-plugin/pty-tail.ts",
+        "telegram-plugin/history.ts",
+        "telegram-plugin/session-tail.ts",
+      ],
+    },
   },
 });

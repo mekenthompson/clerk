@@ -314,3 +314,30 @@ Delete the old `reply` code path. Remove the PTY tail's primary role
 
 **Rollback.** Unset `CLERK_STREAMING_V2`. Old code path is still live
 through Phase 2. No data migration required.
+
+## Coverage
+
+Phase 1 coverage audit (v8 provider, `vitest run --coverage`). Command:
+
+```
+npx vitest run --coverage \
+  --coverage.include='src/agents/handoff-summarizer.ts' \
+  --coverage.include='telegram-plugin/handoff-continuity.ts' \
+  --coverage.include='telegram-plugin/steering.ts' \
+  --coverage.include='telegram-plugin/streaming-metrics.ts' \
+  --coverage.include='telegram-plugin/context-exhaustion.ts' \
+  --exclude='**/pty-tail.test.ts' --exclude='**/merge.test.ts'
+```
+
+| Module | % Lines | % Branch | Uncovered critical paths |
+|---|---|---|---|
+| `telegram-plugin/context-exhaustion.ts` | 100.0 | 100.0 | — |
+| `telegram-plugin/steering.ts` | 100.0 | 100.0 | — |
+| `telegram-plugin/handoff-continuity.ts` | 95.45 | 93.54 | catch branch of `readFileSync` (lines 39-40) and of `unlinkSync` race (line 62) — both defensive, require injected fs failure to exercise |
+| `telegram-plugin/streaming-metrics.ts` | 82.35 | 85.71 | lines 91-93: `performance.now` fallback to `process.hrtime`. UNCOVERED: would require deleting `globalThis.performance` at test time; fallback is pure defensive code for non-Node/Bun hosts. Not exercised in CI. |
+| `src/agents/handoff-summarizer.ts` | 84.44 | 77.65 | lines 373-374, 389-390: stdin streaming fallback for when the Anthropic client is not injected, plus the top-level `main()` wrapper. UNCOVERED: exercised manually via the `clerk handoff` CLI end-to-end during session-handoff development. |
+
+All five modules meet or exceed the 80% line-coverage bar. Remaining
+gaps are defensive fallbacks and the top-level CLI entrypoint —
+cheaper to manually exercise than to mock out.
+
