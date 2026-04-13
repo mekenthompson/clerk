@@ -95,8 +95,16 @@ steps:
   - label: ":compass: Skills evals — trigger routing"
     key: evals-trigger
     command: |
-      export CLAUDE_CODE_OAUTH_TOKEN="$$(buildkite-agent secret get CLAUDE_CODE_OAUTH_TOKEN 2>/dev/null || true)"
-      if [[ -z "$$CLAUDE_CODE_OAUTH_TOKEN" && -z "$${ANTHROPIC_API_KEY:-}" ]]; then
+      # Prefer the API key (separate billing pool) over the OAuth token
+      # (subscription, weekly cap). Both are stored as cluster secrets.
+      KEY_FETCHED="$$(buildkite-agent secret get ANTHROPIC_API_KEY 2>/dev/null || true)"
+      if [[ -n "$$KEY_FETCHED" ]]; then
+        export ANTHROPIC_API_KEY="$$KEY_FETCHED"
+        unset CLAUDE_CODE_OAUTH_TOKEN
+      else
+        export CLAUDE_CODE_OAUTH_TOKEN="$$(buildkite-agent secret get CLAUDE_CODE_OAUTH_TOKEN 2>/dev/null || true)"
+      fi
+      if [[ -z "$${ANTHROPIC_API_KEY:-}" && -z "$${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
         echo "No Anthropic credential available — skipping eval"
         exit 0
       fi
@@ -117,8 +125,14 @@ steps:
   - label: ":sparkles: Skills evals — quality"
     key: evals-quality
     command: |
-      export CLAUDE_CODE_OAUTH_TOKEN="$$(buildkite-agent secret get CLAUDE_CODE_OAUTH_TOKEN 2>/dev/null || true)"
-      if [[ -z "$$CLAUDE_CODE_OAUTH_TOKEN" && -z "$${ANTHROPIC_API_KEY:-}" ]]; then
+      KEY_FETCHED="$$(buildkite-agent secret get ANTHROPIC_API_KEY 2>/dev/null || true)"
+      if [[ -n "$$KEY_FETCHED" ]]; then
+        export ANTHROPIC_API_KEY="$$KEY_FETCHED"
+        unset CLAUDE_CODE_OAUTH_TOKEN
+      else
+        export CLAUDE_CODE_OAUTH_TOKEN="$$(buildkite-agent secret get CLAUDE_CODE_OAUTH_TOKEN 2>/dev/null || true)"
+      fi
+      if [[ -z "$${ANTHROPIC_API_KEY:-}" && -z "$${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
         echo "No Anthropic credential available — skipping eval"
         exit 0
       fi
