@@ -215,6 +215,130 @@ export class V1Extractor implements MessageRegionExtractor {
   }
 }
 
+// ─── ToolActivityExtractor ────────────────────────────────────────────────
+//
+// Design note (2026-04-13): during tool-heavy turns that end with a single
+// `reply` call, the V1Extractor above emits nothing until the very end —
+// the user sees a gap, which reads as "the bot is hung". We fix that by
+// ALSO surfacing tool-call activity ("Bash: git status", "Read: foo.ts",
+// "Grep: pattern") as short one-liners, so the plugin can push a live
+// status via stream_reply on a separate lane.
+//
+// Chosen lane approach (docs were ambiguous — picking what's cleaner given
+// the stream-reply-handler `lane` parameter that landed 2026-04-13): emit
+// activity lines OUT-OF-BAND via a second callback (`onActivity`), separate
+// from the reply-text `onPartial`. The consumer (server.ts) routes these
+// to a dedicated `"activity"` lane via stream_reply(lane: "activity"). This
+// keeps the existing reply/stream_reply path untouched (all current tests
+// still pass unmodified), and avoids mixing status noise into the answer
+// text buffer.
+
+export interface ToolActivityExtractor {
+  readonly version: string
+  /**
+   * Return a SHORT (<100 char) human-readable status string for the most
+   * recent tool-call bullet in the buffer, or null if none / the same as
+   * the last extraction (dedup is the consumer's job — extractor just
+   * surfaces the current top-of-stack activity).
+   */
+  extract(terminal: Terminal): string | null
+}
+
+/**
+ * v1 activity extractor. Scans the buffer bottom-up for Claude Code's Ink
+ * tool-call bullet pattern:
+ *
+ *     ● Bash(git status)
+ *     ● Read(/path/to/file.ts)
+ *     ● Grep(pattern, path: "...")
+ *     ● Glob(**\/*.ts)
+ *     ● clerk-telegram - reply (MCP)(...)
+ *
+ * For the core tools we render a short verbed one-liner ("Running Bash:
+ * git status", "Reading file.ts", "Searching with Grep: pattern"). For
+ * clerk-telegram tool calls we return null — those are already surfaced
+ * by V1Extractor on the main lane, and echoing them on the activity lane
+ * would be confusing.
+ */
+export class V1ToolActivityExtractor implements ToolActivityExtractor {
+  readonly version = 'v1-tool-activity'
+
+  extract(terminal: Terminal): string | null {
+    const buf = terminal.buffer.active
+    for (let i = buf.length - 1; i >= 0; i--) {
+      const raw = buf.getLine(i)?.translateToString(true) ?? ''
+      // Find a bullet anywhere on the line (Ink may indent).
+      const bulletIdx = raw.indexOf('●')
+      if (bulletIdx < 0) continue
+      const after = raw.slice(bulletIdx + 1).trimStart()
+      if (after === '') continue
+
+      // Skip clerk-telegram tool calls — V1Extractor owns those.
+      if (after.startsWith('clerk-telegram')) return null
+
+      // Match `ToolName(` or `ToolName -` patterns. Accept the conventional
+      // Claude Code tool names; anything else is "Running <Tool>".
+      const m = after.match(/^([A-Za-z_][A-Za-z0-9_-]*)[\s(]/)
+      if (!m) continue
+      const tool = m[1]
+
+      // Grab the inside of the first (...) group if present, keeping only
+      // up to the first comma for a short preview.
+      const parenOpen = after.indexOf('(')
+      let inner = ''
+      if (parenOpen >= 0) {
+        // Simple depth-aware walk: stop at the matching close paren. Good
+        // enough for a short status preview.
+        let depth = 0
+        let end = -1
+        for (let j = parenOpen; j < after.length; j++) {
+          const ch = after[j]
+          if (ch === '(') depth++
+          else if (ch === ')') {
+            depth--
+            if (depth === 0) { end = j; break }
+          }
+        }
+        inner = end > parenOpen ? after.slice(parenOpen + 1, end) : after.slice(parenOpen + 1)
+        // Trim to first meaningful arg (up to first ", " at depth 0).
+        const commaIdx = inner.indexOf(', ')
+        if (commaIdx > 0) inner = inner.slice(0, commaIdx)
+        inner = inner.trim()
+        // Strip surrounding quotes from a single-arg string.
+        if (inner.startsWith('"') && inner.endsWith('"') && inner.length >= 2) {
+          inner = inner.slice(1, -1)
+        }
+      }
+
+      // Truncate overlong inner strings.
+      const MAX = 80
+      if (inner.length > MAX) inner = inner.slice(0, MAX - 1) + '…'
+
+      // Verbed phrasing per tool.
+      const verb = activityVerb(tool)
+      const phrase = inner.length > 0 ? `${verb}: ${inner}` : verb
+      // Final guardrail: one line, no control chars.
+      return phrase.replace(/\s+/g, ' ').trim().slice(0, 120)
+    }
+    return null
+  }
+}
+
+function activityVerb(tool: string): string {
+  switch (tool) {
+    case 'Bash': return 'Running Bash'
+    case 'Read': return 'Reading file'
+    case 'Write': return 'Writing file'
+    case 'Edit': return 'Editing file'
+    case 'Grep': return 'Searching with Grep'
+    case 'Glob': return 'Searching with Glob'
+    case 'WebFetch': return 'Fetching URL'
+    case 'WebSearch': return 'Searching the web'
+    case 'Task': return 'Running sub-agent'
+    default: return `Running ${tool}`
+  }
+}
+
 // ─── PTY tail ────────────────────────────────────────────────────────────
 
 export interface PtyTailConfig {
@@ -233,6 +357,16 @@ export interface PtyTailConfig {
   onPartial: (text: string) => void
   /** Called when the model finishes a turn (extracted text reaches a stable terminal). */
   onFinal?: (text: string) => void
+  /**
+   * Optional second extractor that surfaces tool-call activity ("Running
+   * Bash: ls", "Reading file: foo.ts"). When provided, the tail runs both
+   * extractors on every byte batch and fires `onActivity` (deduped + same
+   * throttle) when the activity line changes. Independent of onPartial —
+   * the consumer chooses how to route it (typically a separate lane).
+   */
+  activityExtractor?: ToolActivityExtractor
+  /** Called when the activity extractor's output changes (deduped + throttled). */
+  onActivity?: (text: string) => void
 }
 
 export interface PtyTailHandle {
@@ -256,6 +390,8 @@ export interface PtyTailHandle {
 export function startPtyTail(config: PtyTailConfig): PtyTailHandle {
   const throttleMs = config.throttleMs ?? 150
   const extractor = config.extractor ?? new V1Extractor()
+  const activityExtractor = config.activityExtractor ?? null
+  const onActivity = config.onActivity ?? null
   const log = config.log
   const cols = config.cols ?? 132
   const rows = config.rows ?? 40
@@ -269,8 +405,11 @@ export function startPtyTail(config: PtyTailConfig): PtyTailHandle {
 
   let cursor = 0
   let lastEmittedText: string | null = null
+  let lastEmittedActivity: string | null = null
   let lastEmitAt = 0
+  let lastActivityEmitAt = 0
   let pendingEmit: ReturnType<typeof setTimeout> | null = null
+  let pendingActivity: ReturnType<typeof setTimeout> | null = null
   let stopped = false
   let watcher: FSWatcher | null = null
   let pollTimer: ReturnType<typeof setInterval> | null = null
@@ -293,7 +432,41 @@ export function startPtyTail(config: PtyTailConfig): PtyTailHandle {
     }
   }
 
+  function emitActivityIfChanged(): void {
+    if (stopped) return
+    if (activityExtractor == null || onActivity == null) return
+    const text = activityExtractor.extract(term)
+    if (text == null) return
+    // Dedup: identical to last emission → skip.
+    if (text === lastEmittedActivity) return
+    lastEmittedActivity = text
+    lastActivityEmitAt = Date.now()
+    try {
+      onActivity(text)
+    } catch (err) {
+      log?.(`pty-tail: onActivity threw: ${(err as Error).message}`)
+    }
+  }
+
+  function scheduleActivityEmit(): void {
+    if (activityExtractor == null || onActivity == null) return
+    if (pendingActivity != null) return
+    const sinceLast = Date.now() - lastActivityEmitAt
+    if (sinceLast >= throttleMs) {
+      emitActivityIfChanged()
+      return
+    }
+    pendingActivity = setTimeout(() => {
+      pendingActivity = null
+      emitActivityIfChanged()
+    }, Math.max(0, throttleMs - sinceLast))
+  }
+
   function scheduleEmit(): void {
+    // Always try to surface tool activity alongside reply text. Independent
+    // throttle/dedup — activity changes on every new tool-call bullet, while
+    // reply text grows character-by-character.
+    scheduleActivityEmit()
     if (pendingEmit != null) return
     // Fire immediately if the throttle window is open (this is critical
     // for first-paint latency — without this, the very first emit waits
@@ -434,6 +607,10 @@ export function startPtyTail(config: PtyTailConfig): PtyTailHandle {
       if (pendingEmit) {
         clearTimeout(pendingEmit)
         pendingEmit = null
+      }
+      if (pendingActivity) {
+        clearTimeout(pendingActivity)
+        pendingActivity = null
       }
       try { term.dispose() } catch { /* ignore */ }
     },

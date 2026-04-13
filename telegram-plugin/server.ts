@@ -37,7 +37,15 @@ import { execFileSync, execSync, spawn } from 'child_process'
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync } from 'fs'
 import { homedir } from 'os'
 import { join, extname, sep, basename, dirname } from 'path'
+import { installPluginLogger } from './plugin-logger.js'
 import { StatusReactionController } from './status-reactions.js'
+
+// Route all process.stderr.write calls (including downstream "telegram channel:",
+// "[streaming-metrics] ...", and draft-stream edit-error lines) to a rotating
+// file at ~/.clerk/logs/telegram-plugin.log. Claude Code does not forward the
+// bun subprocess's stderr anywhere, so without this the plugin is blind to
+// its own logs in production. Override path via CLERK_TELEGRAM_LOG_PATH.
+installPluginLogger()
 import { type DraftStreamHandle } from './draft-stream.js'
 import { createStreamController } from './stream-controller.js'
 import { handlePtyPartialPure, type PtyHandlerState } from './pty-partial-handler.js'

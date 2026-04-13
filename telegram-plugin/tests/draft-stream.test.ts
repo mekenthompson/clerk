@@ -290,6 +290,71 @@ describe('createDraftStream', () => {
     expect(stream.getMessageId()).toBe(100)
   })
 
+  // ─── Regex-tightening regression (2026-04-13) ─────────────────────────
+  //
+  // The recoverable-edit-error regex previously used /not found/i and
+  // /not modified/i, which would also match Telegram errors like
+  // "chat not found" or "thread not found" — misclassifying them as
+  // "preview was deleted" and re-sending into a dead chat. These tests
+  // pin the tightened behavior: ONLY the two real Telegram strings
+  // ("message is not modified" / "message to edit not found") trigger
+  // the recovery path.
+
+  it('does NOT recover on "chat not found" — treated as generic failure', async () => {
+    const m = makeMock()
+    m.edit = async () => { throw new Error('Bad Request: chat not found') }
+    const stream = createDraftStream(m.send, m.edit, { throttleMs: 1000 })
+
+    void stream.update('first')
+    await microtaskFlush()
+    expect(m.sendCalls.length).toBe(1)
+
+    vi.advanceTimersByTime(1000)
+    void stream.update('second')
+    await microtaskFlush()
+    await microtaskFlush()
+
+    // No re-send, messageId stays captured — this is the generic
+    // "don't retry forever" path.
+    expect(m.sendCalls.length).toBe(1)
+    expect(stream.getMessageId()).toBe(100)
+  })
+
+  it('does NOT recover on "thread not found" — treated as generic failure', async () => {
+    const m = makeMock()
+    m.edit = async () => { throw new Error('Bad Request: message thread not found') }
+    const stream = createDraftStream(m.send, m.edit, { throttleMs: 1000 })
+
+    void stream.update('first')
+    await microtaskFlush()
+    vi.advanceTimersByTime(1000)
+    void stream.update('second')
+    await microtaskFlush()
+    await microtaskFlush()
+
+    expect(m.sendCalls.length).toBe(1)
+    expect(stream.getMessageId()).toBe(100)
+  })
+
+  it('does NOT treat "user not modified" or similar as success', async () => {
+    const m = makeMock()
+    m.edit = async () => {
+      throw new Error('Bad Request: user not modified since last check')
+    }
+    const stream = createDraftStream(m.send, m.edit, { throttleMs: 1000 })
+
+    void stream.update('first')
+    await microtaskFlush()
+    vi.advanceTimersByTime(1000)
+    void stream.update('second')
+    await microtaskFlush()
+    await microtaskFlush()
+
+    // Generic error path: messageId stays, no re-send.
+    expect(m.sendCalls.length).toBe(1)
+    expect(stream.getMessageId()).toBe(100)
+  })
+
   // ─── Pre-send idle coalesce (idleMs) ──────────────────────────────────
 
   it('idleMs=0 preserves legacy behavior (first update fires immediately)', async () => {
