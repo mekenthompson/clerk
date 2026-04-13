@@ -27,3 +27,4 @@ Thumbs.db
 # Python bytecode (from vendored Hindsight plugin)
 __pycache__/
 *.pyc
+coverage/
