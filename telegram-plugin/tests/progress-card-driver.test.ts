@@ -5,17 +5,20 @@
  * deterministic (no real wall-clock waits in CI).
  */
 import { describe, it, expect, vi } from 'vitest'
-import { createProgressDriver } from '../progress-card-driver.js'
+import { createProgressDriver, summariseTurn } from '../progress-card-driver.js'
+import { initialState, reduce } from '../progress-card.js'
 import type { SessionEvent } from '../session-tail.js'
 
-function harness(minIntervalMs = 500, coalesceMs = 400) {
+function harness(minIntervalMs = 500, coalesceMs = 400, opts?: { captureSummaries?: boolean }) {
   let now = 1000
   const timers: Array<{ fireAt: number; fn: () => void; ref: number }> = []
   let nextRef = 0
   const emits: Array<{ chatId: string; threadId?: string; html: string; done: boolean }> = []
+  const summaries: string[] = []
 
   const driver = createProgressDriver({
     emit: (a) => emits.push(a),
+    onTurnEnd: opts?.captureSummaries ? (s) => summaries.push(s) : undefined,
     minIntervalMs,
     coalesceMs,
     now: () => now,
@@ -43,7 +46,7 @@ function harness(minIntervalMs = 500, coalesceMs = 400) {
     }
   }
 
-  return { driver, emits, advance, tick: advance }
+  return { driver, emits, summaries, advance, tick: advance }
 }
 
 const enqueue = (chatId: string, text = 'hi'): SessionEvent => ({
@@ -152,5 +155,62 @@ describe('progress-card driver', () => {
     expect(emits).toHaveLength(0)
     advance(200) // now past both windows
     expect(emits).toHaveLength(1)
+  })
+
+  it('fires onTurnEnd with a one-line summary at turn_end', () => {
+    const { driver, summaries } = harness(500, 400, { captureSummaries: true })
+    driver.ingest(enqueue('c1', 'fix the tests'), null)
+    driver.ingest({ kind: 'tool_use', toolName: 'Read' }, 'c1')
+    driver.ingest({ kind: 'tool_result', toolUseId: 'a', toolName: 'Read' }, 'c1')
+    driver.ingest({ kind: 'tool_use', toolName: 'Bash' }, 'c1')
+    driver.ingest({ kind: 'tool_result', toolUseId: 'b', toolName: 'Bash' }, 'c1')
+    driver.ingest({ kind: 'turn_end', durationMs: 500 }, 'c1')
+    expect(summaries).toHaveLength(1)
+    expect(summaries[0]).toContain('2 tools')
+    expect(summaries[0]).toContain('fix the tests')
+  })
+
+  it('does not fire onTurnEnd when callback is not supplied', () => {
+    const { driver, summaries } = harness() // no captureSummaries
+    driver.ingest(enqueue('c1'), null)
+    driver.ingest({ kind: 'turn_end', durationMs: 0 }, 'c1')
+    expect(summaries).toHaveLength(0)
+  })
+})
+
+describe('summariseTurn', () => {
+  const base = (now: number, userRequest: string) =>
+    reduce(initialState(), {
+      kind: 'enqueue',
+      chatId: 'c',
+      messageId: '1',
+      threadId: null,
+      rawContent: `<channel chat_id="c">${userRequest}</channel>`,
+    }, now)
+
+  it('zero tools renders as "no tools"', () => {
+    const s = base(1000, 'hi')
+    expect(summariseTurn(s, 2000)).toBe('no tools, 1s — hi')
+  })
+
+  it('pluralises correctly', () => {
+    let s = base(1000, 'x')
+    s = reduce(s, { kind: 'tool_use', toolName: 'Read' }, 1100)
+    s = reduce(s, { kind: 'tool_result', toolUseId: 'a', toolName: 'Read' }, 1200)
+    expect(summariseTurn(s, 5000)).toBe('1 tool, 4s — x')
+  })
+
+  it('m:ss format above 60 seconds', () => {
+    const s = base(1000, 'long')
+    expect(summariseTurn(s, 1000 + 125_000)).toBe('no tools, 2:05 — long')
+  })
+
+  it('falls back gracefully without a user request', () => {
+    let s = reduce(initialState(), {
+      kind: 'enqueue', chatId: 'c', messageId: null, threadId: null, rawContent: '',
+    }, 1000)
+    s = reduce(s, { kind: 'tool_use', toolName: 'Read' }, 1100)
+    s = reduce(s, { kind: 'tool_result', toolUseId: 'a', toolName: 'Read' }, 1200)
+    expect(summariseTurn(s, 2000)).toBe('1 tool, 1s')
   })
 })

@@ -172,6 +172,7 @@ import {
   consumeHandoffTopic,
   shouldShowHandoffLine,
   formatHandoffLine,
+  writeLastTurnSummary,
   type HandoffFormat,
 } from './handoff-continuity.js'
 
@@ -1698,6 +1699,14 @@ if (streamMode === 'checklist') {
           `telegram channel: progress-card emit failed: ${(err as Error).message}\n`,
         )
       })
+    },
+    onTurnEnd: (summary) => {
+      // Persist a compact one-line summary of the just-completed turn so
+      // the next session's first reply can prepend "↩️ Picked up — …"
+      // even if the Stop-hook summarizer didn't run. Best-effort: writer
+      // swallows IO errors.
+      const agentDir = resolveAgentDirFromEnv()
+      if (agentDir != null) writeLastTurnSummary(agentDir, summary)
     },
   })
   process.stderr.write('telegram channel: progress-card driver active (stream_mode=checklist)\n')
