@@ -3361,6 +3361,20 @@ async function handleInbound(
   // steering message extended an already-live turn, skip — the existing
   // card keeps updating for the in-flight turn.
   if (!isSteering) {
+    // Defense-in-depth (fix B): close any progress-lane stream still
+    // sitting in `activeDraftStreams` for this chat+thread BEFORE the
+    // driver fires its skeleton render. The normal lifecycle relies on
+    // either (a) the previous turn's `turn_end` calling closeProgressLane
+    // via handleSessionEvent, or (b) the driver's own done:true emit
+    // causing handleStreamReply to delete the entry on finalize. Both
+    // paths can be skipped under pathological session JSONL (orphan
+    // enqueues with no <channel> wrapper, dropped turn_end events). When
+    // either skip happens, the next startTurn would otherwise reuse the
+    // stale stream and edit the previous turn's messageId — burying the
+    // card far up-chat above newer user messages. Proactively closing
+    // the lane at the true "new user turn" boundary is the only event
+    // both paths reliably converge on.
+    closeProgressLane(chat_id, messageThreadId)
     try {
       progressDriver?.startTurn({
         chatId: chat_id,
