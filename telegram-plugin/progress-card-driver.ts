@@ -272,6 +272,24 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
     for (let i = 0; i < a.items.length; i++) {
       if (a.items[i].state !== b.items[i].state) return true
       if (a.items[i].tool !== b.items[i].tool) return true
+      // Multi-agent: spawnedAgentId attached on correlation matters for
+      // the [Main] line's 🤖 vs ✅ glyph (PR 3 renderer).
+      if (a.items[i].spawnedAgentId !== b.items[i].spawnedAgentId) return true
+    }
+    // Multi-agent: any change in sub-agent shape or per-sub-agent state
+    // is user-visible. Cheap O(N) scan; N is the sub-agent count, which
+    // is bounded by how many parallel Agent calls one turn makes (~4–12
+    // in practice).
+    if (a.subAgents.size !== b.subAgents.size) return true
+    for (const [k, sa] of a.subAgents) {
+      const sb = b.subAgents.get(k)
+      if (!sb) return true
+      if (sa.state !== sb.state) return true
+      if (sa.toolCount !== sb.toolCount) return true
+      if (sa.description !== sb.description) return true
+      if (sa.parentToolUseId !== sb.parentToolUseId) return true
+      if (sa.nestedSpawnCount !== sb.nestedSpawnCount) return true
+      if ((sa.currentTool?.toolUseId ?? null) !== (sb.currentTool?.toolUseId ?? null)) return true
     }
     return false
   }
