@@ -305,9 +305,21 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
         threadId = event.threadId ?? undefined
         // Remember the active chat so subsequent events in this turn
         // (routed from the session-tail with chatIdMaybe=null) still
-        // find their way here.
-        currentChatId = chatId
-        currentThreadId = threadId
+        // find their way here. Guard against orphan enqueues whose
+        // content lacks the <channel chat_id="…"> wrapper — those
+        // surface as { chatId: null }, and overwriting currentChatId
+        // with null here would lose the prior turn's routing and cause
+        // every subsequent tool_use / turn_end in this driver to fall
+        // out at the chatId==null guard below. Fall back to the prior
+        // turn's chat instead, mirroring how the session-tail itself
+        // continues to deliver events.
+        if (chatId != null) {
+          currentChatId = chatId
+          currentThreadId = threadId
+        } else {
+          chatId = currentChatId
+          threadId = currentThreadId
+        }
       } else if (chatId == null) {
         // Non-enqueue event with no explicit chat: fall back to the
         // most recently enqueued chat for this driver.
@@ -371,10 +383,18 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
           chats.delete(k)
           lastHeartbeatBucket.delete(k)
           editTimestamps.delete(k)
-          if (currentChatId === chatId && currentThreadId === threadId) {
-            currentChatId = null
-            currentThreadId = undefined
-          }
+          // Intentionally DO NOT null currentChatId / currentThreadId
+          // here. Doing so used to break the next turn whenever its
+          // enqueue arrived as an orphan (no <channel> wrapper):
+          // ingest() would lose its chatId fallback at line ~317 and
+          // every subsequent tool_use / turn_end for that turn would
+          // bail, which in turn meant handleStreamReply never received
+          // a done:true for the previous turn — leaving the stale
+          // progress-card stream pinned in activeDraftStreams and the
+          // next turn editing the prior turn's messageId. Keeping the
+          // last-active routing across turn_end is harmless: the next
+          // wrapped enqueue will overwrite it; an orphan enqueue will
+          // correctly inherit it.
           // Stop heartbeat when no chats remain active.
           if (chats.size === 0) stopHeartbeat()
         }

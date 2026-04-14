@@ -747,9 +747,9 @@ describe('progress-card cross-turn lifecycle (regression for stale messageId)', 
     await wait(40)
     ingest({ kind: 'tool_result', toolUseId: 't1', toolName: 'Bash' } as SessionEvent)
     ingest({ kind: 'turn_end', durationMs: 100 } as SessionEvent)
-    await microtaskFlush(20)
-    await wait(50)
-    await microtaskFlush(20)
+    await microtaskFlush(50)
+    await wait(400)
+    await microtaskFlush(50)
 
     // ─── Turn 2 — ORPHAN enqueue (no channel wrapper) ──────────────────
     // This simulates the production case where the parent JSONL writes a
@@ -769,9 +769,9 @@ describe('progress-card cross-turn lifecycle (regression for stale messageId)', 
     await wait(40)
     ingest({ kind: 'tool_result', toolUseId: 't2', toolName: 'Read' } as SessionEvent)
     ingest({ kind: 'turn_end', durationMs: 100 } as SessionEvent)
-    await microtaskFlush(20)
-    await wait(50)
-    await microtaskFlush(20)
+    await microtaskFlush(50)
+    await wait(400)
+    await microtaskFlush(50)
 
     // ─── Turn 3 — wrapped enqueue (normal) ─────────────────────────────
     driver.startTurn({ chatId: 'c1', userText: 'third turn' })
@@ -779,9 +779,9 @@ describe('progress-card cross-turn lifecycle (regression for stale messageId)', 
     await wait(40)
     ingest({ kind: 'tool_result', toolUseId: 't3', toolName: 'Grep' } as SessionEvent)
     ingest({ kind: 'turn_end', durationMs: 100 } as SessionEvent)
-    await microtaskFlush(20)
-    await wait(50)
-    await microtaskFlush(20)
+    await microtaskFlush(50)
+    await wait(400)
+    await microtaskFlush(50)
 
     driver.dispose?.()
 
