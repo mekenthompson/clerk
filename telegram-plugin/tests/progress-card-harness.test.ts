@@ -31,6 +31,9 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { startSessionTail, getProjectsDirForCwd, type SessionEvent } from '../session-tail.js'
 import { createProgressDriver } from '../progress-card-driver.js'
+import { handleStreamReply } from '../stream-reply-handler.js'
+import type { DraftStreamHandle } from '../draft-stream.js'
+import { createMockBot, microtaskFlush } from './bot-api.harness.js'
 
 // ─── Mock Telegram Bot API ────────────────────────────────────────────────
 
@@ -661,5 +664,182 @@ describe('progress-card multi-agent harness', () => {
         driver.dispose?.()
       }
     })
+  }, 15_000)
+})
+
+// ─── Regression: progress card pinned to stale messageId across turns ────
+//
+// Two production bugs cause every progress-card update to land on the same
+// Telegram messageId across many consecutive turns, so the card gets
+// buried far up-chat above newer user messages and appears invisible:
+//
+//   (A) Orphan-turn routing: enqueue events occasionally land WITHOUT the
+//       <channel chat_id="…"> wrapper. The driver's enqueue handler then
+//       has no chatId and bails. Without a fallback the subsequent
+//       turn_end can't route either, so done:true is never emitted.
+//
+//   (B) Stale stream persistence: when the driver's done:true never
+//       emits, handleStreamReply never deletes the activeDraftStreams
+//       entry and the next turn's startTurn reuses the existing stream
+//       — editing the prior message rather than spawning a new one.
+//
+// This block wires the driver to the REAL handleStreamReply against a
+// mock bot.api so we observe the same `editMessageText`/`sendMessage`
+// pattern Telegram would receive in production.
+
+describe('progress-card cross-turn lifecycle (regression for stale messageId)', () => {
+  it('three consecutive turns each spawn a fresh messageId, even with one orphan enqueue', async () => {
+    const bot = createMockBot(800)
+    const activeDraftStreams = new Map<string, DraftStreamHandle>()
+    const activeDraftParseModes = new Map<string, 'HTML' | 'MarkdownV2' | undefined>()
+
+    const driver = createProgressDriver({
+      // Wire the driver's emit through the same handleStreamReply path
+      // server.ts uses, against the mock bot.
+      emit: ({ chatId, threadId, html, done }) => {
+        void handleStreamReply(
+          {
+            chat_id: chatId,
+            text: html,
+            done,
+            message_thread_id: threadId,
+            lane: 'progress',
+            format: 'html',
+          },
+          { activeDraftStreams, activeDraftParseModes },
+          {
+            bot,
+            markdownToHtml: (t) => t,
+            escapeMarkdownV2: (t) => t,
+            repairEscapedWhitespace: (t) => t,
+            takeHandoffPrefix: () => '',
+            assertAllowedChat: () => {},
+            resolveThreadId: (_, explicit) => (explicit != null ? Number(explicit) : undefined),
+            disableLinkPreview: true,
+            defaultFormat: 'html',
+            logStreamingEvent: () => {},
+            endStatusReaction: () => {},
+            historyEnabled: false,
+            recordOutbound: () => {},
+            writeError: () => {},
+            // Fast throttle so the test runs quickly without burning
+            // wall-clock waits.
+            throttleMs: 10,
+          },
+        ).catch(() => { /* swallow — same fire-and-forget posture as server.ts */ })
+      },
+      coalesceMs: 5,
+      minIntervalMs: 5,
+      heartbeatMs: 0,
+    })
+
+    const wait = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
+
+    // Helper that mirrors server.ts's onEvent fan-out for handleSessionEvent
+    // → progressDriver.ingest. We don't need the full handleSessionEvent;
+    // we only need to feed events into the driver. The closeProgressLane
+    // path is what we want to exercise WITHOUT.
+    const ingest = (ev: SessionEvent) => driver.ingest(ev, null)
+
+    // ─── Turn 1 — wrapped enqueue (normal) ─────────────────────────────
+    driver.startTurn({ chatId: 'c1', userText: 'first turn' })
+    ingest({ kind: 'tool_use', toolName: 'Bash', toolUseId: 't1', input: {} } as SessionEvent)
+    await wait(40)
+    ingest({ kind: 'tool_result', toolUseId: 't1', toolName: 'Bash' } as SessionEvent)
+    ingest({ kind: 'turn_end', durationMs: 100 } as SessionEvent)
+    await microtaskFlush(20)
+    await wait(50)
+    await microtaskFlush(20)
+
+    // ─── Turn 2 — ORPHAN enqueue (no channel wrapper) ──────────────────
+    // This simulates the production case where the parent JSONL writes a
+    // queue-operation enqueue whose `content` lacks the <channel> XML.
+    // The session-tail surfaces it as { kind:'enqueue', chatId:null, … }.
+    // No startTurn call here either — startTurn comes from the inbound
+    // user message gate, which the orphan path bypasses entirely (the
+    // model self-enqueued, e.g. via auto-resume or an internal trigger).
+    ingest({
+      kind: 'enqueue',
+      chatId: null,
+      messageId: null,
+      threadId: null,
+      rawContent: 'orphan content with no channel wrapper',
+    } as SessionEvent)
+    ingest({ kind: 'tool_use', toolName: 'Read', toolUseId: 't2', input: {} } as SessionEvent)
+    await wait(40)
+    ingest({ kind: 'tool_result', toolUseId: 't2', toolName: 'Read' } as SessionEvent)
+    ingest({ kind: 'turn_end', durationMs: 100 } as SessionEvent)
+    await microtaskFlush(20)
+    await wait(50)
+    await microtaskFlush(20)
+
+    // ─── Turn 3 — wrapped enqueue (normal) ─────────────────────────────
+    driver.startTurn({ chatId: 'c1', userText: 'third turn' })
+    ingest({ kind: 'tool_use', toolName: 'Grep', toolUseId: 't3', input: {} } as SessionEvent)
+    await wait(40)
+    ingest({ kind: 'tool_result', toolUseId: 't3', toolName: 'Grep' } as SessionEvent)
+    ingest({ kind: 'turn_end', durationMs: 100 } as SessionEvent)
+    await microtaskFlush(20)
+    await wait(50)
+    await microtaskFlush(20)
+
+    driver.dispose?.()
+
+    // ─── Assertions ────────────────────────────────────────────────────
+
+    // (1) Each turn must have spawned its OWN sendMessage (a new
+    //     Telegram message_id). With three turns we expect at least three
+    //     distinct sendMessage calls — one per turn's first emit. Edits
+    //     to a turn's own message via editMessageText are fine; what's
+    //     not OK is the next turn editing the prior turn's message.
+    const sentMessageIds = bot.api.sendMessage.mock.results
+      .map((r) => (r.value as Promise<{ message_id: number }>))
+    const resolvedIds = await Promise.all(sentMessageIds)
+    const distinctSendIds = new Set(resolvedIds.map((r) => r.message_id))
+    expect(distinctSendIds.size).toBeGreaterThanOrEqual(3)
+
+    // (2) Every editMessageText call must target a message_id that was
+    //     produced by a sendMessage WITHIN THE SAME TURN. We check this
+    //     by walking the call log in order: track the "current" sent
+    //     id (the most recent sendMessage), and assert every edit
+    //     between sends targets that id. Cross-turn edits would target
+    //     an id from a previous turn, which is the bug.
+    const calls: Array<{ kind: 'send' | 'edit'; id: number }> = []
+    for (const call of bot.api.sendMessage.mock.results) {
+      const v = await (call.value as Promise<{ message_id: number }>)
+      calls.push({ kind: 'send', id: v.message_id })
+    }
+    // Re-derive call ordering from invocation order. mock.invocationCallOrder
+    // gives a global ordering across mocks, letting us interleave them.
+    const sendOrder = bot.api.sendMessage.mock.invocationCallOrder
+    const editOrder = bot.api.editMessageText.mock.invocationCallOrder
+    const ordered: Array<{ kind: 'send' | 'edit'; id?: number; idx: number }> = []
+    sendOrder.forEach((seq, i) => ordered.push({ kind: 'send', idx: seq, id: undefined }))
+    editOrder.forEach((seq, i) =>
+      ordered.push({ kind: 'edit', idx: seq, id: bot.api.editMessageText.mock.calls[i][1] as number }),
+    )
+    ordered.sort((a, b) => a.idx - b.idx)
+
+    // Replay the chronologically-ordered stream of API calls.
+    let currentSendId: number | null = null
+    let sendIndex = 0
+    for (const c of ordered) {
+      if (c.kind === 'send') {
+        const r = await (bot.api.sendMessage.mock.results[sendIndex++].value as Promise<{ message_id: number }>)
+        currentSendId = r.message_id
+      } else {
+        // An edit must target the most recently sent id (same turn).
+        expect(c.id).toBe(currentSendId)
+      }
+    }
+
+    // (3) Every turn (including the orphan one in the middle) must have
+    //     emitted a done:true to the bot — i.e. handleStreamReply with
+    //     done=true ran for each turn, deleting the stream entry. We
+    //     observe this indirectly: activeDraftStreams must be empty at
+    //     the end, AND total sendMessage calls is one per turn (since
+    //     done:true clean-up means each turn's first emit creates a
+    //     fresh stream).
+    expect(activeDraftStreams.size).toBe(0)
   }, 15_000)
 })
