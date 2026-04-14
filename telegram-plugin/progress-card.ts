@@ -45,6 +45,14 @@ export interface ChecklistItem {
   readonly startedAt: number
   /** Unix ms when tool_result arrived. Only set on done/failed. */
   readonly finishedAt?: number
+  /**
+   * Multi-agent: for `Agent`/`Task` tool_use items only, the `agentId`
+   * of the correlated sub-agent. Set when `sub_agent_started` lands and
+   * matches this item's prompt text. Renderer (later PR) uses it to
+   * keep the [Main] line in 🤖 (not ✅) until the parent's tool_result
+   * arrives. Null until correlation succeeds.
+   */
+  readonly spawnedAgentId?: string | null
 }
 
 export type Stage = 'plan' | 'run' | 'done'
@@ -201,11 +209,61 @@ export function reduce(
         state: 'running',
         startedAt: now,
       }
+      // Multi-agent: if this is an Agent/Task tool_use, stage a pending
+      // spawn awaiting the matching sub-agent JSONL. Correlation key is
+      // the prompt text (the sub-agent's first user message contains
+      // exactly this string). Reverse-race: if a sub-agent already
+      // landed as orphan with this prompt text, adopt it now.
+      let pendingAgentSpawns = state.pendingAgentSpawns
+      let subAgents = state.subAgents
+      if (
+        (event.toolName === 'Agent' || event.toolName === 'Task') &&
+        event.toolUseId &&
+        event.input
+      ) {
+        const promptText = String(event.input.prompt ?? '')
+        const description = String(event.input.description ?? '') || promptText.slice(0, 50)
+        const subagentType =
+          typeof event.input.subagent_type === 'string'
+            ? (event.input.subagent_type as string)
+            : undefined
+        // Reverse-race adoption: scan orphan sub-agents (parentToolUseId
+        // null) for a prompt-text match and adopt the FIRST matching one.
+        // FIFO disambiguates duplicate-prompt bursts (rare).
+        let adopted = false
+        for (const [agentId, sa] of subAgents) {
+          if (sa.parentToolUseId == null && sa.firstPromptText === promptText) {
+            const next = new Map(subAgents)
+            next.set(agentId, {
+              ...sa,
+              parentToolUseId: event.toolUseId,
+              description,
+              subagentType,
+            })
+            subAgents = next
+            adopted = true
+            break
+          }
+        }
+        if (!adopted) {
+          const nextPending = new Map(pendingAgentSpawns)
+          nextPending.set(event.toolUseId, {
+            parentToolUseId: event.toolUseId,
+            description,
+            subagentType,
+            promptText,
+            startedAt: now,
+          })
+          pendingAgentSpawns = nextPending
+        }
+      }
       return {
         ...state,
         items: [...state.items, nextItem],
         stage: 'run',
         thinking: false,
+        pendingAgentSpawns,
+        subAgents,
       }
     }
 
@@ -231,7 +289,128 @@ export function reduce(
       const items = state.items.slice()
       const nextState: ItemState = event.isError === true ? 'failed' : 'done'
       items[idx] = { ...items[idx], state: nextState, finishedAt: now }
-      return { ...state, items }
+      // Multi-agent: a parent Agent/Task tool_result is the authoritative
+      // close-out for its sub-agent. Find any sub-agent linked to this
+      // toolUseId (via parentToolUseId) and finalize it. Also clear any
+      // matching pendingAgentSpawn (sub-agent JSONL never appeared).
+      let subAgents = state.subAgents
+      let pendingAgentSpawns = state.pendingAgentSpawns
+      if (event.toolUseId) {
+        for (const [agentId, sa] of subAgents) {
+          if (sa.parentToolUseId === event.toolUseId) {
+            const next = new Map(subAgents)
+            next.set(agentId, { ...sa, state: nextState, finishedAt: now })
+            subAgents = next
+            break
+          }
+        }
+        if (pendingAgentSpawns.has(event.toolUseId)) {
+          const next = new Map(pendingAgentSpawns)
+          next.delete(event.toolUseId)
+          pendingAgentSpawns = next
+        }
+      }
+      return { ...state, items, subAgents, pendingAgentSpawns }
+    }
+
+    case 'sub_agent_started': {
+      if (state.turnStartedAt === 0) return state
+      // Already known? (Defensive — re-attach can re-emit.)
+      if (state.subAgents.has(event.agentId)) return state
+      // Try to correlate by prompt-text against pendingAgentSpawns. On
+      // hit: move pending → subAgents, link the matching [Main]
+      // ChecklistItem via spawnedAgentId, and consume the pending entry.
+      // On miss: register as orphan; the parent's tool_use may arrive
+      // later (reverse race) and adopt via the tool_use case.
+      let parentToolUseId: string | null = null
+      let description = '(uncorrelated)'
+      let subagentType: string | undefined
+      let pendingAgentSpawns = state.pendingAgentSpawns
+      let items = state.items
+      for (const [parentId, pending] of pendingAgentSpawns) {
+        if (pending.promptText === event.firstPromptText) {
+          parentToolUseId = parentId
+          description = pending.description
+          subagentType = pending.subagentType
+          const nextPending = new Map(pendingAgentSpawns)
+          nextPending.delete(parentId)
+          pendingAgentSpawns = nextPending
+          // Link the [Main] checklist item back so renderer can keep
+          // its 🤖 state consistent.
+          items = items.map((it) =>
+            it.toolUseId === parentId
+              ? { ...it, spawnedAgentId: event.agentId }
+              : it,
+          )
+          break
+        }
+      }
+      const sub: SubAgentState = {
+        agentId: event.agentId,
+        description,
+        subagentType: subagentType ?? event.subagentType,
+        parentToolUseId,
+        state: 'running',
+        startedAt: now,
+        toolCount: 0,
+        firstPromptText: event.firstPromptText,
+        nestedSpawnCount: 0,
+      }
+      const subAgents = new Map(state.subAgents)
+      subAgents.set(event.agentId, sub)
+      return { ...state, subAgents, pendingAgentSpawns, items }
+    }
+
+    case 'sub_agent_tool_use': {
+      const sa = state.subAgents.get(event.agentId)
+      if (!sa) return state
+      const next = new Map(state.subAgents)
+      next.set(event.agentId, {
+        ...sa,
+        toolCount: sa.toolCount + 1,
+        currentTool: event.toolUseId
+          ? {
+              tool: event.toolName,
+              label: toolLabel(event.toolName, event.input),
+              toolUseId: event.toolUseId,
+              startedAt: now,
+            }
+          : sa.currentTool,
+      })
+      return { ...state, subAgents: next }
+    }
+
+    case 'sub_agent_tool_result': {
+      const sa = state.subAgents.get(event.agentId)
+      if (!sa) return state
+      // Per design §3.3: per-tool errors don't fail the agent; only the
+      // parent's tool_result does. We just clear currentTool if it
+      // matches.
+      if (sa.currentTool && sa.currentTool.toolUseId === event.toolUseId) {
+        const next = new Map(state.subAgents)
+        next.set(event.agentId, { ...sa, currentTool: undefined })
+        return { ...state, subAgents: next }
+      }
+      return state
+    }
+
+    case 'sub_agent_turn_end': {
+      const sa = state.subAgents.get(event.agentId)
+      if (!sa) return state
+      // Tentative close: parent's tool_result is still authoritative.
+      // If it later arrives with isError=true, the tool_result case
+      // overrides this 'done' with 'failed'.
+      const next = new Map(state.subAgents)
+      next.set(event.agentId, { ...sa, state: 'done', finishedAt: now })
+      return { ...state, subAgents: next }
+    }
+
+    case 'sub_agent_nested_spawn': {
+      const sa = state.subAgents.get(event.agentId)
+      if (!sa) return state
+      const next = new Map(state.subAgents)
+      next.set(event.agentId, { ...sa, nestedSpawnCount: sa.nestedSpawnCount + 1 })
+      return { ...state, subAgents: next }
     }
 
     case 'turn_end': {
@@ -240,7 +419,20 @@ export function reduce(
       const items = state.items.map((it) =>
         it.state === 'running' ? { ...it, state: 'done' as const, finishedAt: now } : it,
       )
-      return { ...state, items, stage: 'done', thinking: false }
+      // Close any still-running sub-agents + clear pending spawns that
+      // never correlated.
+      const subAgents = new Map<string, SubAgentState>()
+      for (const [k, sa] of state.subAgents) {
+        subAgents.set(k, sa.state === 'running' ? { ...sa, state: 'done', finishedAt: now } : sa)
+      }
+      return {
+        ...state,
+        items,
+        subAgents,
+        pendingAgentSpawns: new Map(),
+        stage: 'done',
+        thinking: false,
+      }
     }
 
     case 'dequeue':
