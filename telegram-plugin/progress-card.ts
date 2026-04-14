@@ -538,6 +538,11 @@ export function applyVisibleCap(
 /**
  * Render the current state to Telegram HTML. `now` is the wall-clock time
  * used for elapsed-time calculations so the render is deterministic in tests.
+ *
+ * Multi-agent: when `PROGRESS_CARD_MULTI_AGENT=1` AND there is any sub-agent
+ * activity (subAgents non-empty OR pendingAgentSpawns non-empty), the card
+ * splits into [Main] / [Sub-agents] sections. Otherwise the layout is
+ * byte-identical to the legacy single-section card.
  */
 export function render(state: ProgressCardState, now: number): string {
   if (state.turnStartedAt === 0) {
@@ -561,6 +566,16 @@ export function render(state: ProgressCardState, now: number): string {
   // Thin visual separator so the bullets below don't blur into the header.
   lines.push('─ ─ ─')
 
+  const multiAgentActive =
+    isMultiAgentEnabled() &&
+    (state.subAgents.size > 0 || state.pendingAgentSpawns.size > 0)
+
+  // [Main] header only when multi-agent rendering is active. Keeps the
+  // single-agent case visually unchanged (no header, just the checklist).
+  if (multiAgentActive) {
+    lines.push(`[Main · ${state.items.length} tools]`)
+  }
+
   // Checklist — preserve insertion order; running items show elapsed time.
   // The old static "🤔 Plan → 🔧 Run → ✅ Done" phase line is gone: users
   // asked for a live per-tool-call checklist instead. The header banner
@@ -571,23 +586,18 @@ export function render(state: ProgressCardState, now: number): string {
     lines.push(`  … (+${visible.overflowCount} more earlier steps)`)
   }
   for (const item of visible.items) {
-    const emoji = STATE_EMOJI[item.state]
-    if (item.state === 'running') {
-      const dur = formatDuration(now - item.startedAt)
-      lines.push(`  ${emoji} ${renderItemCore(item.tool, item.label, /*bold*/ true)} <i>(${dur})</i>`)
-    } else if ((item.state === 'done' || item.state === 'failed') && item.finishedAt != null) {
-      if (item.kind === 'rollup') {
-        lines.push(`  ${emoji} ${escapeHtml(item.tool)} <i>×${item.count}</i>`)
-      } else {
-        // Short tools don't need duration — they're ~always sub-second.
-        const dur = formatDuration(item.finishedAt - item.startedAt)
-        const needsDuration = item.finishedAt - item.startedAt >= 1000
-        lines.push(
-          `  ${emoji} ${renderItemCore(item.tool, item.label)}${needsDuration ? ` <i>(${dur})</i>` : ''}`,
-        )
+    lines.push(renderMainItem(item, now, multiAgentActive, state.subAgents))
+  }
+
+  // [Sub-agents] section
+  if (multiAgentActive && state.subAgents.size > 0) {
+    lines.push('') // blank separator
+    const counts = countSubAgentStates(state.subAgents)
+    lines.push(`[Sub-agents · ${formatSubAgentCounts(counts)}]`)
+    for (const sa of sortSubAgentsChrono(state.subAgents)) {
+      for (const l of renderSubAgent(sa, now, state.stage === 'done')) {
+        lines.push(l)
       }
-    } else {
-      lines.push(`  ${emoji} ${renderItemCore(item.tool, item.label)}`)
     }
   }
 
@@ -598,6 +608,142 @@ export function render(state: ProgressCardState, now: number): string {
   }
 
   return lines.join('\n')
+}
+
+/**
+ * Render one [Main]-section line. Encapsulates the existing per-state
+ * branches (running/rollup/done) so the main render() loop reads cleanly.
+ *
+ * Multi-agent twist (Ken locked-in #4): an `Agent`/`Task` item with a
+ * correlated, still-running sub-agent stays in the 🤖 emoji even if its
+ * own state field already happens to be 'running' — and we DON'T flip it
+ * to ✅ on a tentative `sub_agent_turn_end`. Only the parent's own
+ * tool_result (which mutates `item.state` to 'done'/'failed') flips it.
+ */
+function renderMainItem(
+  item: RolledItem,
+  now: number,
+  multiAgentActive: boolean,
+  subAgents: ReadonlyMap<string, SubAgentState>,
+): string {
+  const isAgent = item.tool === 'Agent' || item.tool === 'Task'
+  const indent = multiAgentActive ? '  ' : '  '
+
+  if (isAgent && item.state === 'running' && multiAgentActive) {
+    // Hold the 🤖 emoji while the sub-agent (if correlated) is alive.
+    // Show elapsed since the parent's tool_use fired.
+    const dur = formatDuration(now - item.startedAt)
+    return `${indent}🤖 ${renderItemCore(item.tool, item.label, /*bold*/ true)} <i>(${dur})</i>`
+  }
+
+  const emoji = STATE_EMOJI[item.state]
+  if (item.state === 'running') {
+    const dur = formatDuration(now - item.startedAt)
+    return `${indent}${emoji} ${renderItemCore(item.tool, item.label, /*bold*/ true)} <i>(${dur})</i>`
+  }
+  if ((item.state === 'done' || item.state === 'failed') && item.finishedAt != null) {
+    if (item.kind === 'rollup') {
+      return `${indent}${emoji} ${escapeHtml(item.tool)} <i>×${item.count}</i>`
+    }
+    const dur = formatDuration(item.finishedAt - item.startedAt)
+    const needsDuration = item.finishedAt - item.startedAt >= 1000
+    // For Agent/Task in multi-agent mode, prefix emoji is the regular
+    // ✅/❌ — design §1.4 shows "✅ Agent: …" on the final card. The
+    // sub-agent's own state lives in the [Sub-agents] section.
+    return `${indent}${emoji} ${renderItemCore(item.tool, item.label)}${needsDuration ? ` <i>(${dur})</i>` : ''}`
+  }
+  // pending fallback
+  void subAgents
+  return `${indent}${emoji} ${renderItemCore(item.tool, item.label)}`
+}
+
+/**
+ * Sort sub-agents by chronological start time — oldest first (Ken
+ * locked-in #1). Stable across renders so rows don't shuffle as states
+ * transition. We deliberately do NOT bucket by state (failed-first /
+ * done-first) because state changes mid-turn would cause visible
+ * reorder.
+ */
+function sortSubAgentsChrono(
+  subAgents: ReadonlyMap<string, SubAgentState>,
+): SubAgentState[] {
+  return Array.from(subAgents.values()).sort((a, b) => a.startedAt - b.startedAt)
+}
+
+interface SubAgentCounts {
+  running: number
+  done: number
+  failed: number
+}
+
+function countSubAgentStates(
+  subAgents: ReadonlyMap<string, SubAgentState>,
+): SubAgentCounts {
+  let running = 0
+  let done = 0
+  let failed = 0
+  for (const sa of subAgents.values()) {
+    if (sa.state === 'running') running++
+    else if (sa.state === 'done') done++
+    else if (sa.state === 'failed') failed++
+  }
+  return { running, done, failed }
+}
+
+function formatSubAgentCounts(c: SubAgentCounts): string {
+  const parts: string[] = []
+  if (c.running > 0) parts.push(`${c.running} running`)
+  if (c.done > 0) parts.push(`${c.done} done`)
+  if (c.failed > 0) parts.push(`${c.failed} failed`)
+  return parts.length === 0 ? '0' : parts.join(', ')
+}
+
+/**
+ * Render a sub-agent block. Two lines while running (header + current
+ * activity), one line when done/failed (compact summary).
+ *
+ * Header line includes:
+ *  - state emoji (🤖 running, ✅ done, ❌ failed)
+ *  - description (or '(uncorrelated)' for orphans)
+ *  - subagent_type after a ` · ` separator (Ken locked-in #2 — always show)
+ *  - elapsed time
+ *  - `(spawned N)` suffix when nestedSpawnCount > 0 (Ken locked-in #3)
+ *
+ * The `forceCollapse` arg is set on `turn_end` (Ken locked-in #5) so the
+ * archived card never carries the running two-line shape.
+ */
+function renderSubAgent(
+  sa: SubAgentState,
+  now: number,
+  forceCollapse: boolean,
+): string[] {
+  const desc = sa.description || '(uncorrelated)'
+  const typeSuffix = sa.subagentType ? ` · ${escapeHtml(sa.subagentType)}` : ''
+  const spawnedSuffix = sa.nestedSpawnCount > 0
+    ? ` <i>(spawned ${sa.nestedSpawnCount})</i>`
+    : ''
+
+  if (sa.state !== 'running' || forceCollapse) {
+    const emoji = sa.state === 'failed' ? '❌' : '✅'
+    const end = sa.finishedAt ?? now
+    const dur = formatDuration(end - sa.startedAt)
+    return [
+      `  ${emoji} ${escapeHtml(truncate(desc, 50))}${typeSuffix} · ${dur} · ${sa.toolCount} tools${spawnedSuffix}`,
+    ]
+  }
+
+  // Running: two-line block.
+  const elapsed = formatDuration(now - sa.startedAt)
+  const headerLine = `  🤖 <b>${escapeHtml(truncate(desc, 50))}</b>${typeSuffix} · ⏱ ${elapsed}${spawnedSuffix}`
+  if (sa.currentTool) {
+    const cur = sa.currentTool
+    const curDur = formatDuration(now - cur.startedAt)
+    return [
+      headerLine,
+      `     └ 🔧 ${renderItemCore(cur.tool, cur.label)} <i>(${curDur})</i> · ${sa.toolCount} tools`,
+    ]
+  }
+  return [headerLine, `     └ <i>(idle)</i> · ${sa.toolCount} tools`]
 }
 
 /**
