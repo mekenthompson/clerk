@@ -12,11 +12,20 @@
  * effects — which keeps them unit-testable in isolation.
  */
 
-import { readFileSync, unlinkSync, existsSync } from "node:fs";
+import { readFileSync, unlinkSync, existsSync, writeFileSync, renameSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 export const TOPIC_DISPLAY_MAX = 117;
 export const HANDOFF_TOPIC_FILENAME = ".handoff-topic";
+/**
+ * Secondary sidecar written by the progress-card driver on every
+ * successful turn_end. The file is overwritten each turn so it always
+ * reflects the most-recent turn. Used as a fallback source for the
+ * continuity line when the Stop-hook summarizer hasn't run yet (e.g.
+ * crash, mid-session restart, summarizer failure). Deleted alongside
+ * `.handoff-topic` in `consumeHandoffTopic`.
+ */
+export const LAST_TURN_SUMMARY_FILENAME = ".last-turn-summary";
 
 export function resolveAgentDirFromEnv(): string | null {
   const state = process.env.TELEGRAM_STATE_DIR;
@@ -48,19 +57,98 @@ export function readHandoffTopic(agentDir: string): string | null {
 }
 
 /**
- * Read + delete the topic file atomically (best-effort). A second call
- * returns null even if the first succeeded — the sidecar is one-shot.
+ * Read the per-turn summary file if present (written by the progress-
+ * card driver on every turn_end). Returns the trimmed first non-empty
+ * line, truncated like `readHandoffTopic`. The file is always
+ * overwritten so it reflects the most-recent completed turn.
  */
-export function consumeHandoffTopic(agentDir: string): string | null {
-  const topic = readHandoffTopic(agentDir);
-  if (topic === null) return null;
-  const p = join(agentDir, HANDOFF_TOPIC_FILENAME);
+export function readLastTurnSummary(agentDir: string): string | null {
+  const p = join(agentDir, LAST_TURN_SUMMARY_FILENAME);
+  if (!existsSync(p)) return null;
+  let raw: string;
   try {
-    unlinkSync(p);
+    raw = readFileSync(p, "utf-8");
   } catch {
-    // Already gone / race — the topic we read is still valid to return
+    return null;
+  }
+  const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
+  if (lines.length === 0) return null;
+  let topic = lines[0];
+  if (topic.length > TOPIC_DISPLAY_MAX) {
+    topic = topic.slice(0, TOPIC_DISPLAY_MAX) + "…";
   }
   return topic;
+}
+
+/**
+ * Read + delete the topic file atomically (best-effort). A second call
+ * returns null even if the first succeeded — the sidecar is one-shot.
+ *
+ * Fallback: if no `.handoff-topic` is present (summarizer didn't run,
+ * crashed, or the session was restarted mid-loop), try the
+ * `.last-turn-summary` sidecar written by the progress-card driver.
+ * Both sidecars get removed on consume so the continuity line only
+ * fires once per resume.
+ */
+export function consumeHandoffTopic(agentDir: string): string | null {
+  const primary = readHandoffTopic(agentDir);
+  const primaryPath = join(agentDir, HANDOFF_TOPIC_FILENAME);
+  const fallbackPath = join(agentDir, LAST_TURN_SUMMARY_FILENAME);
+
+  // Always remove the per-turn summary when we consume — otherwise a
+  // later session restart would still see a stale entry even after the
+  // continuity line fired.
+  const removeFallback = (): void => {
+    try {
+      unlinkSync(fallbackPath);
+    } catch {
+      /* already gone */
+    }
+  };
+
+  if (primary !== null) {
+    try {
+      unlinkSync(primaryPath);
+    } catch {
+      /* already gone */
+    }
+    removeFallback();
+    return primary;
+  }
+
+  const fallback = readLastTurnSummary(agentDir);
+  if (fallback !== null) {
+    removeFallback();
+    return fallback;
+  }
+  return null;
+}
+
+/**
+ * Atomically overwrite `.last-turn-summary` with a single-line summary.
+ * Called by the progress-card driver on every turn_end. Best-effort: any
+ * write failure is swallowed (logged by the caller if desired) — a
+ * missing fallback file is recoverable, a half-written one is not.
+ *
+ * The summary is the natural plain-text signature of a completed turn:
+ *   `<N tools, Ys> — <user request (truncated)>`
+ * Callers should pass a pre-built line; this function handles only the
+ * atomic write + first-line discipline.
+ */
+export function writeLastTurnSummary(agentDir: string, summary: string): void {
+  const line = summary.split(/\r?\n/)[0]?.trim() ?? "";
+  if (line.length === 0) return;
+  const final = line.length > TOPIC_DISPLAY_MAX
+    ? line.slice(0, TOPIC_DISPLAY_MAX) + "…"
+    : line;
+  const p = join(agentDir, LAST_TURN_SUMMARY_FILENAME);
+  const tmp = `${p}.tmp-${process.pid}-${Date.now()}`;
+  try {
+    writeFileSync(tmp, final + "\n", "utf-8");
+    renameSync(tmp, p);
+  } catch {
+    /* best-effort — continuity line is purely cosmetic */
+  }
 }
 
 /**

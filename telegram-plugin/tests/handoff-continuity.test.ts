@@ -8,8 +8,11 @@ import {
   consumeHandoffTopic,
   shouldShowHandoffLine,
   formatHandoffLine,
+  readLastTurnSummary,
+  writeLastTurnSummary,
   TOPIC_DISPLAY_MAX,
   HANDOFF_TOPIC_FILENAME,
+  LAST_TURN_SUMMARY_FILENAME,
 } from "../handoff-continuity.js";
 
 describe("resolveAgentDirFromEnv", () => {
@@ -98,6 +101,90 @@ describe("consumeHandoffTopic", () => {
 
   it("returns null when the file is missing", () => {
     expect(consumeHandoffTopic(tmp)).toBeNull();
+  });
+
+  it("falls back to .last-turn-summary when no .handoff-topic exists", () => {
+    writeFileSync(join(tmp, LAST_TURN_SUMMARY_FILENAME), "3 tools, 12s — fix the bug");
+    expect(consumeHandoffTopic(tmp)).toBe("3 tools, 12s — fix the bug");
+    // Fallback sidecar removed so a repeat call doesn't refire.
+    expect(existsSync(join(tmp, LAST_TURN_SUMMARY_FILENAME))).toBe(false);
+  });
+
+  it("prefers .handoff-topic when both files exist", () => {
+    writeFileSync(join(tmp, HANDOFF_TOPIC_FILENAME), "llm summary");
+    writeFileSync(join(tmp, LAST_TURN_SUMMARY_FILENAME), "card summary");
+    expect(consumeHandoffTopic(tmp)).toBe("llm summary");
+    // Both get removed so neither stays around to fire on a later restart.
+    expect(existsSync(join(tmp, HANDOFF_TOPIC_FILENAME))).toBe(false);
+    expect(existsSync(join(tmp, LAST_TURN_SUMMARY_FILENAME))).toBe(false);
+  });
+});
+
+describe("readLastTurnSummary", () => {
+  let tmp: string;
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), "handoff-lastturn-"));
+  });
+
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("returns null when missing", () => {
+    expect(readLastTurnSummary(tmp)).toBeNull();
+  });
+
+  it("reads the first non-empty line", () => {
+    writeFileSync(join(tmp, LAST_TURN_SUMMARY_FILENAME), "\n5 tools, 47s — run evals\nmore\n");
+    expect(readLastTurnSummary(tmp)).toBe("5 tools, 47s — run evals");
+  });
+
+  it("truncates long summaries", () => {
+    writeFileSync(join(tmp, LAST_TURN_SUMMARY_FILENAME), "x".repeat(TOPIC_DISPLAY_MAX + 10));
+    const got = readLastTurnSummary(tmp)!;
+    expect(got.endsWith("…")).toBe(true);
+    expect(got.length).toBe(TOPIC_DISPLAY_MAX + 1);
+  });
+});
+
+describe("writeLastTurnSummary", () => {
+  let tmp: string;
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), "handoff-write-"));
+  });
+
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("writes a round-trippable summary", () => {
+    writeLastTurnSummary(tmp, "7 tools, 02:04 — ship the progress card");
+    expect(readLastTurnSummary(tmp)).toBe("7 tools, 02:04 — ship the progress card");
+  });
+
+  it("overwrites on subsequent calls (always reflects the most-recent turn)", () => {
+    writeLastTurnSummary(tmp, "first turn");
+    writeLastTurnSummary(tmp, "second turn");
+    expect(readLastTurnSummary(tmp)).toBe("second turn");
+  });
+
+  it("writes only the first line even when input is multi-line", () => {
+    writeLastTurnSummary(tmp, "headline\nlots more context goes here\nstill more");
+    expect(readLastTurnSummary(tmp)).toBe("headline");
+  });
+
+  it("truncates over-long input at TOPIC_DISPLAY_MAX + ellipsis", () => {
+    writeLastTurnSummary(tmp, "x".repeat(TOPIC_DISPLAY_MAX + 50));
+    const got = readLastTurnSummary(tmp)!;
+    expect(got.length).toBe(TOPIC_DISPLAY_MAX + 1);
+    expect(got.endsWith("…")).toBe(true);
+  });
+
+  it("no-ops on empty / whitespace-only input (never writes an empty file)", () => {
+    writeLastTurnSummary(tmp, "   ");
+    expect(existsSync(join(tmp, LAST_TURN_SUMMARY_FILENAME))).toBe(false);
   });
 });
 

@@ -31,6 +31,15 @@ export interface ProgressDriverConfig {
     html: string
     done: boolean
   }) => void
+  /**
+   * Optional callback fired once per turn immediately after the final
+   * render on `turn_end`. Receives a compact, one-line plain-text
+   * summary suitable for the session-handoff continuity line. The outer
+   * layer typically pipes this into `writeLastTurnSummary(agentDir, …)`
+   * so that a session restart can show "↩️ Picked up — &lt;summary&gt;"
+   * even if the Stop-hook summarizer didn't run.
+   */
+  onTurnEnd?: (summary: string) => void
   /** Min ms between edits for a given chat+thread. Default 500. */
   minIntervalMs?: number
   /** Coalesce window — burst events within this land as one render. Default 400. */
@@ -40,6 +49,25 @@ export interface ProgressDriverConfig {
   /** `setTimeout` override for tests. */
   setTimeout?: (fn: () => void, ms: number) => { ref: unknown }
   clearTimeout?: (ref: unknown) => void
+}
+
+/**
+ * Compact one-line summary of a completed turn for the handoff sidecar.
+ * Shape: `"<tool-count> tool[s], <duration> — <user-request>"`.
+ * Falls back gracefully when fields are missing (empty items → "no tools";
+ * no userRequest → just the stats prefix).
+ */
+export function summariseTurn(state: ProgressCardState, now: number): string {
+  const toolCount = state.items.length
+  const toolLabel = toolCount === 1 ? '1 tool' : `${toolCount} tools`
+  const durSec = Math.max(0, Math.floor((now - state.turnStartedAt) / 1000))
+  const dur =
+    durSec >= 60
+      ? `${Math.floor(durSec / 60)}:${(durSec % 60).toString().padStart(2, '0')}`
+      : `${durSec}s`
+  const stats = toolCount === 0 ? `no tools, ${dur}` : `${toolLabel}, ${dur}`
+  const req = state.userRequest?.trim()
+  return req ? `${stats} — ${req}` : stats
 }
 
 interface PerChatState {
@@ -156,6 +184,16 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
       if (event.kind === 'turn_end' || event.kind === 'enqueue' || stageChanged) {
         flush(chatState, /*forceDone*/ event.kind === 'turn_end')
         if (event.kind === 'turn_end') {
+          // Emit a one-line summary for the handoff sidecar (see
+          // writeLastTurnSummary in handoff-continuity.ts). Best-effort:
+          // the outer callback swallows IO errors.
+          if (config.onTurnEnd) {
+            try {
+              config.onTurnEnd(summariseTurn(chatState.state, now()))
+            } catch {
+              /* never let a summary write break the stream */
+            }
+          }
           // Drop the chat state so a subsequent turn starts clean.
           chats.delete(k)
         }
