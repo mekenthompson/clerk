@@ -368,7 +368,7 @@ describe('projectSubagentLine', () => {
     ])
   })
 
-  it('emits sub_agent_tool_use for assistant tool_use blocks; nested Agent fires nested_spawn too', () => {
+  it('emits sub_agent_tool_use for regular tools; nested Agent fires ONLY nested_spawn', () => {
     const st = { hasEmittedStart: true }
     const line = JSON.stringify({
       type: 'assistant',
@@ -380,10 +380,14 @@ describe('projectSubagentLine', () => {
       },
     })
     const events = projectSubagentLine(line, 'X', st)
-    expect(events.length).toBe(3)
+    // 2 events: 1 sub_agent_tool_use (Read) + 1 nested_spawn (the Agent).
+    // Per design §5.5 we do NOT also emit sub_agent_tool_use for the
+    // nested Agent — that would surface the sub-sub-agent's description
+    // as the parent sub-agent's currentTool and break "no recursion in
+    // rendering."
+    expect(events.length).toBe(2)
     expect(events[0].kind).toBe('sub_agent_tool_use')
-    expect(events[1].kind).toBe('sub_agent_tool_use')
-    expect(events[2]).toEqual({ kind: 'sub_agent_nested_spawn', agentId: 'X' })
+    expect(events[1]).toEqual({ kind: 'sub_agent_nested_spawn', agentId: 'X' })
   })
 
   it('emits sub_agent_turn_end on system turn_duration', () => {

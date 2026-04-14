@@ -294,20 +294,22 @@ export function projectSubagentLine(
       const ct = c.type as string | undefined
       if (ct === 'tool_use') {
         const name = (c.name as string | undefined) ?? ''
-        // A nested Agent/Task call inside a sub-agent: count it as a
-        // nested spawn so the parent sub-agent line shows (spawned N),
-        // but ALSO emit it as a regular tool_use for the sub-agent's
-        // own tool count (sub-agent A's own Agent call is still a tool
-        // it ran — chrono ordering needs to see it).
-        events.push({
-          kind: 'sub_agent_tool_use',
-          agentId,
-          toolUseId: (c.id as string | undefined) ?? null,
-          toolName: name,
-          input: (c.input as Record<string, unknown> | undefined) ?? undefined,
-        })
+        // Nested Agent/Task call inside a sub-agent: track ONLY as a
+        // nested_spawn count (renders as "(spawned N)" suffix on the
+        // parent sub-agent line). Per design §5.5 we do NOT expose
+        // sub-sub-agent activity as the parent sub-agent's currentTool —
+        // that would surface the sub-sub-agent's description and break
+        // the "no recursion in rendering" rule.
         if (name === 'Agent' || name === 'Task') {
           events.push({ kind: 'sub_agent_nested_spawn', agentId })
+        } else {
+          events.push({
+            kind: 'sub_agent_tool_use',
+            agentId,
+            toolUseId: (c.id as string | undefined) ?? null,
+            toolName: name,
+            input: (c.input as Record<string, unknown> | undefined) ?? undefined,
+          })
         }
       }
     }
