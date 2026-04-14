@@ -39,13 +39,13 @@ If you've already invested in Claude Code conventions — skills, CLAUDE.md file
 
 ## Subscription auth vs API key
 
-Claude Pro is $20/month; Claude Max is $100/month. For an always-on fleet, that's effectively flat-rate inference. API billing via the Agents SDK scales linearly with token usage, which for interactive/long-running agents tends to cost more.
+Claude Pro is $20/month; Claude Max is $100/month. For an always-on agent, that's effectively flat-rate inference. API billing via the Agents SDK scales linearly with token usage, which for interactive/long-running agents tends to cost more.
 
 OAuth also unifies your account: the same auth your desktop app uses, the same account history, the same rate limits.
 
 ## Config cascade vs ENV vars
 
-NanoClaw configures agents through environment variables. That's fine for one or two agents but breaks down at fleet scale — you end up copy-pasting envs, and there's no inheritance.
+NanoClaw configures agents through environment variables. That's fine for a single agent but breaks down once you run more than one — you end up copy-pasting envs, and there's no inheritance.
 
 Clerk's `clerk.yaml` has three layers:
 1. **defaults** — applied to every agent unless overridden.

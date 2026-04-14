@@ -2,12 +2,12 @@
 
 A production-grade Telegram channel for Claude Code. Forked from the
 [official Claude Code Telegram plugin](https://github.com/anthropics/claude-plugins-official)
-and substantially extended for long-running, multi-agent deployments.
+and substantially extended for long-running, always-on Claude Code agents.
 
 ## Why this fork exists
 
 The upstream plugin handles the basic send/receive wire protocol. This fork
-adds the ergonomics and reliability that an always-on agent fleet needs:
+adds the ergonomics and reliability that an always-on agent needs:
 
 - **Streaming replies** — `stream_reply` edits a single message in place as
   work progresses (~1/sec throttle), so users see live progress instead of
@@ -17,8 +17,8 @@ adds the ergonomics and reliability that an always-on agent fleet needs:
   use → 🔥 streaming → 👍 done) on the user's own message gives "I'm working"
   feedback for free, plus stall watchdogs (🥱 30s idle, 😨 90s).
 - **Forum topic routing** — `message_thread_id` is auto-captured from inbound
-  messages and applied to all replies, so multi-agent setups can run one bot
-  per topic in a shared group.
+  messages and applied to all replies, so each forum topic can host its own
+  dedicated agent (one agent per topic, one bot token per agent).
 - **Smart HTML chunking** — long messages split at paragraph/line boundaries
   with tag integrity preserved across the boundary (including `tg-spoiler`,
   `tg-emoji`, and tags with attributes like `<a href>` / `<code class>`).
@@ -345,6 +345,6 @@ bun test
 - Status reactions lifecycle, stall watchdogs
 - Steering, handoff continuity, context exhaustion, history (SQLite)
 
-## Use case: multi-agent orchestration
+## Use case: one agent per Telegram channel
 
-In a Clerk multi-agent setup, each agent instance runs this plugin with its **own bot token** (one bot per agent — Telegram's `getUpdates` long-poll holds an exclusive lock per token, so sharing a token between processes drops messages at random) and its own `TELEGRAM_TOPIC_ID`, routing each forum topic in a shared group to a dedicated agent.
+Clerk's supported model is one agent per channel — one per Telegram chat or forum topic. Each agent runs this plugin with its **own bot token** (one bot per agent — Telegram's `getUpdates` long-poll holds an exclusive lock per token, so sharing a token between processes drops messages at random) and its own `TELEGRAM_TOPIC_ID`. Operators who want more than one agent give each its own forum topic and its own bot; the plugin keeps each agent scoped to its topic so conversations don't cross over.

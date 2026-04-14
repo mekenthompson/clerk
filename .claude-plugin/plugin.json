@@ -1,7 +1,7 @@
 {
   "name": "clerk",
   "version": "0.1.0",
-  "description": "Operate clerk — a multi-agent orchestrator for Claude Code — from inside a Claude Code session via skills for install, status, logs, config, restart, reconcile, schedule, and health.",
+  "description": "Operate clerk — a lifecycle tool for running Claude Code as an always-on Telegram agent (one agent per channel) — from inside a Claude Code session via skills for install, status, logs, config, restart, reconcile, schedule, and health.",
   "author": {
     "name": "Ken Thompson"
   },
@@ -11,9 +11,7 @@
   "keywords": [
     "clerk",
     "agents",
-    "multi-agent",
     "telegram",
-    "orchestration",
     "claude-code",
     "skills"
   ]

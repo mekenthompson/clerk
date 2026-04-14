@@ -21,7 +21,7 @@ const pkg = JSON.parse(
 export const program = new Command()
   .name("clerk")
   .description(
-    "Multi-agent orchestrator for Claude Code. One Telegram group, many specialized agents."
+    "Run your Claude Code agent 24/7 on a server and talk to it from Telegram — one agent per channel."
   )
   .version(pkg.version)
   .option("-c, --config <path>", "Path to clerk.yaml config file");

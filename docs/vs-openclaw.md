@@ -1,6 +1,6 @@
 # Clerk vs OpenClaw — an OpenClaw alternative that works with Claude Pro/Max
 
-If you came here because OpenClaw stopped working with your Claude subscription, or because you don't want to run Docker containers per agent, Clerk is built for the same use case with a different set of tradeoffs.
+If you came here because OpenClaw stopped working with your Claude subscription, or because you don't want to run Docker containers, Clerk is built for the same use case with a different set of tradeoffs.
 
 ## TL;DR
 
@@ -27,7 +27,7 @@ If you came here because OpenClaw stopped working with your Claude subscription,
 
 ## Why subscription auth matters
 
-Claude Pro is $20/month and Claude Max is $100/month. For an always-on agent fleet, that's effectively flat-rate inference. API billing for the same workload — even with prompt caching — frequently runs higher for interactive/long-running agents, and you pay per response whether the output was useful or not.
+Claude Pro is $20/month and Claude Max is $100/month. For an always-on agent, that's effectively flat-rate inference. API billing for the same workload — even with prompt caching — frequently runs higher for interactive/long-running agents, and you pay per response whether the output was useful or not.
 
 Using OAuth also means:
 - The same auth flow as the desktop app, so your account history and rate limits are unified.

@@ -2,7 +2,7 @@
 
 ## Summary
 
-Clerk is a multi-agent orchestration tool for Claude Code. This document provides a point-in-time attestation that Clerk's architecture is designed to comply with Anthropic's terms of service and usage policies for Claude Code.
+Clerk is a lifecycle tool for running Claude Code as an always-on agent (one agent per Telegram channel). This document provides a point-in-time attestation that Clerk's architecture is designed to comply with Anthropic's terms of service and usage policies for Claude Code.
 
 **Attestation date:** 2026-04-13T00:00:00Z (revised; supersedes 2026-04-07)
 **Model used for analysis:** Claude Opus 4.6 (1M context)
@@ -12,7 +12,7 @@ Clerk is a multi-agent orchestration tool for Claude Code. This document provide
 
 ## What Clerk Is
 
-Clerk is scaffolding and lifecycle management for multiple Claude Code sessions. It:
+Clerk is scaffolding and lifecycle management for long-running Claude Code sessions, with one agent per Telegram channel. It:
 
 1. Creates directory structures and configuration files for each agent
 2. Generates systemd units to keep agents running
@@ -68,7 +68,7 @@ In both modes:
 - The plugin polls Telegram independently with the agent's own bot token
 - Neither plugin modifies the `claude` binary, intercepts OAuth tokens, or routes subscription credentials anywhere other than directly between the user's Claude Code session and Anthropic
 
-Operators who require strict use of Anthropic-published code paths should set `channels.telegram.plugin: official`. The default is the clerk fork because it provides the production-quality streaming, formatting, and history features needed for a long-running agent fleet.
+Operators who require strict use of Anthropic-published code paths should set `channels.telegram.plugin: official`. The default is the clerk fork because it provides the production-quality streaming, formatting, and history features needed for a long-running agent.
 
 ### 4. MCP Servers Are Explicitly Supported
 
@@ -154,5 +154,5 @@ At no point does any Clerk component sit between Claude Code and Anthropic's inf
 
 Users and organizations deploying Clerk should:
 1. Review Anthropic's current terms of service before deployment
-2. Monitor Anthropic's policy updates for changes affecting plugins or multi-agent usage
+2. Monitor Anthropic's policy updates for changes affecting plugins or long-running agent usage
 3. Consult legal counsel if compliance is critical to their use case

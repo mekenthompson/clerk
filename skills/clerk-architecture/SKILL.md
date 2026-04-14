@@ -6,7 +6,7 @@ user-invocable: false
 
 # Clerk Architecture Overview
 
-Clerk is a multi-agent orchestrator built on Claude Code. It manages multiple Claude agents, each running as a persistent process with its own Telegram bot, memory collection, and configuration.
+Clerk is a lifecycle tool for running Claude Code as an always-on agent you talk to from Telegram. The supported model is one agent per channel (one per Telegram chat or forum topic); when operators run more than one, each agent is an independent persistent process with its own Telegram bot, memory collection, and configuration.
 
 ## Key concepts
 

@@ -23,7 +23,7 @@
 
 ## Overview
 
-Clerk is an open-source multi-agent orchestrator for Claude Code. It manages multiple long-running Claude Code sessions, each with its own persona, memory, tools, and Telegram topic — all using your official Claude Pro/Max subscription.
+Clerk is open-source scaffolding for running Claude Code as an always-on agent you talk to from Telegram, using your official Claude Pro/Max subscription. The supported model is one agent per channel (one per Telegram chat or forum topic); operators who want more than one agent run each in its own topic with its own bot token, and Clerk manages each as an independent long-running Claude Code session with its own persona, memory, and tools.
 
 Clerk is **not a harness or wrapper**. It never intercepts Claude's authentication or inference. It is scaffolding and lifecycle management: it creates directories, generates systemd units, and provides a CLI to manage your agents. Each agent is a real `claude --channels` session, officially authenticated.
 
@@ -54,7 +54,7 @@ A config-driven CLI that:
 ## Design Principles
 
 - **Subscription-compliant**: Uses Claude Code CLI natively. Each agent authenticates via official OAuth. No Agent SDK, no token proxying, no harness behavior. Fully compliant with Anthropic's April 2026 third-party policy.
-- **Config-driven**: One YAML file defines your entire fleet. Add an agent in 10 lines.
+- **Config-driven**: One YAML file defines every agent you run. Add an agent in 10 lines.
 - **Convention over configuration**: Sensible defaults. Override only what you need.
 - **Claude Code native**: Leverages official channels, hooks, skills, MCP servers, sub-agents.
 - **Portable**: Primary path is host-native (systemd + tmux). Optional Docker Compose for container users.

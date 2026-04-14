@@ -7,21 +7,23 @@
 
 **Run Claude Code agents 24/7 on a server, talk to them from Telegram.**
 
-Clerk turns a $6/mo Linux server plus your Claude Pro ($20/mo) or Claude Max ($100/mo) subscription into a fleet of always-on AI agents. Each agent is a real Claude Code session — not a wrapper, not a harness, not a proxy. Clerk handles the lifecycle so you don't have to.
+Clerk turns a $6/mo Linux server plus your Claude Pro ($20/mo) or Claude Max ($100/mo) subscription into an always-on Claude Code agent you can talk to from Telegram. Your agent is a real Claude Code session — not a wrapper, not a harness, not a proxy. Clerk handles the lifecycle so you don't have to.
 
-Clerk is an **open-source alternative to OpenClaw and NanoClaw** that works with your **Claude Pro or Max subscription** via official OAuth — no Anthropic API key, no per-token billing, no Docker containers per agent. If you came here because OpenClaw stopped working with Claude subscription accounts, Clerk is the drop-in path forward.
+Clerk is an **open-source alternative to OpenClaw and NanoClaw** that works with your **Claude Pro or Max subscription** via official OAuth — no Anthropic API key, no per-token billing, no Docker containers. If you came here because OpenClaw stopped working with Claude subscription accounts, Clerk is the drop-in path forward.
+
+One agent per channel (one per Telegram chat or forum topic) is the supported model — it's what Anthropic's current compliance posture allows. If you want more than one agent, run each in its own Telegram forum topic with its own bot.
 
 ## Who this is for
 
-- **You're a Claude Pro or Max subscriber** who wants your $20/$100 a month to do more than chat — you want agents that run tasks while you sleep.
+- **You're a Claude Pro or Max subscriber** who wants your $20/$100 a month to do more than chat — you want an agent that runs tasks while you sleep.
 - **You were using OpenClaw or NanoClaw** and need an alternative that works with Claude subscriptions instead of an API key.
-- **You run a small fleet** (1–20 agents) on a cheap VPS and don't want Docker-per-agent or Kubernetes.
+- **You want your Claude Code agent to live on a cheap VPS** and be reachable from Telegram, without Docker or Kubernetes.
 
 ## Why Clerk?
 
-**Claude Code native.** Every agent runs the unmodified `claude` CLI binary with official OAuth against your Claude Pro or Max account. No credential interception, no API key routing, no third-party inference.
+**Claude Code native.** Your agent runs the unmodified `claude` CLI binary with official OAuth against your Claude Pro or Max account. No credential interception, no API key routing, no third-party inference.
 
-**Simpler than the alternatives.** OpenClaw needs Docker containers per agent and a custom runtime. NanoClaw needs the Agents SDK and container orchestration. Clerk is `clerk setup` → talk to your agent from Telegram.
+**Simpler than the alternatives.** OpenClaw needs Docker containers and a custom runtime. NanoClaw needs the Agents SDK and container orchestration. Clerk is `clerk setup` → talk to your agent from Telegram.
 
 **Smart defaults, opt-in complexity.** A minimal agent is two lines of YAML:
 
@@ -38,7 +40,7 @@ Everything else (model, tools, memory, channels, sub-agents, session policy, sch
 | Feature | Description |
 |---------|-------------|
 | **Telegram interface** | Talk to agents from your phone, anywhere |
-| **Config cascade** | Defaults → profiles → per-agent. Change one line, all agents update |
+| **Config cascade** | Defaults → profiles → per-agent. Change one line, every agent you run updates |
 | **Sub-agent delegation** | Opus plans, Sonnet implements in the background |
 | **Scheduled tasks** | Cron-based, systemd timers, survive reboots |
 | **Persistent memory** | Hindsight semantic memory with knowledge graphs |
@@ -135,13 +137,9 @@ agents:
   assistant:
     topic_name: "General"
     memory: { collection: general }
-
-  coach:
-    topic_name: "Coach"
-    extends: advisor
-    soul:
-      name: Coach
 ```
+
+The supported model is one agent per channel — one per Telegram chat or forum topic. If you want a second agent with a different persona, give it its own forum topic and its own bot token; it runs as an independent `claude` session.
 
 See [docs/configuration.md](docs/configuration.md) for the full reference.
 
@@ -187,7 +185,7 @@ clerk web                                # Web dashboard
 ## FAQ
 
 ### Can I use Clerk with a Claude Pro or Max subscription instead of the API?
-Yes — that's the whole point. Clerk runs the unmodified `claude` CLI and signs in with the same OAuth flow you use on the desktop app. No API key, no per-token billing. Your $20/mo Pro or $100/mo Max plan powers every agent in your fleet.
+Yes — that's the whole point. Clerk runs the unmodified `claude` CLI and signs in with the same OAuth flow you use on the desktop app. No API key, no per-token billing. Your $20/mo Pro or $100/mo Max plan powers your agent.
 
 ### Is Clerk an alternative to OpenClaw?
 Yes. Clerk covers the same use case — run Claude on a server, talk to it from a chat app — but uses your Claude subscription via OAuth instead of an Anthropic API key, and runs the native `claude` binary instead of a custom runtime in Docker. If you used OpenClaw with a Claude Pro/Max account and can't anymore, Clerk is built specifically for that workflow.
@@ -198,8 +196,8 @@ OpenClaw requires Docker containers per agent and a custom runtime. NanoClaw use
 ### Does Clerk need Docker?
 No. Clerk uses systemd units per agent on a regular Ubuntu server. Docker is listed as a prerequisite only because some sub-agent worktrees use it optionally.
 
-### Can I run multiple agents on one server?
-Yes. Clerk is designed for small fleets (tested from 1 to ~20 agents on a 4GB VPS). Each agent gets its own systemd service, Telegram forum topic, memory collection, and optional cron schedule.
+### Can I run more than one agent?
+Yes, with one important constraint: one agent per channel. Anthropic's current compliance posture supports a single agent per Telegram chat or forum topic — not a shared group with many agents on one bot. If you want a second agent, give it its own Telegram forum topic and its own bot token; Clerk will run it as an independent `claude` session with its own systemd service, memory collection, and schedule.
 
 ### What does Clerk cost to run?
 One cheap Linux VPS (Hetzner/DigitalOcean/etc, ~$6/mo), plus your existing Claude Pro ($20/mo) or Max ($100/mo) subscription. No per-agent or per-token surcharge from Clerk itself — it's MIT-licensed open source.

@@ -5,7 +5,7 @@
     "email": "me@kenthompson.com.au"
   },
   "metadata": {
-    "description": "Clerk plugin marketplace — skills for managing clerk multi-agent setups from inside Claude Code."
+    "description": "Clerk plugin marketplace — skills for managing clerk agents (one agent per Telegram channel) from inside Claude Code."
   },
   "plugins": [
     {
@@ -17,7 +17,7 @@
       "license": "MIT",
       "keywords": ["clerk", "agents", "telegram", "orchestration", "skills"],
       "category": "agents",
-      "tags": ["clerk", "multi-agent", "telegram", "ops"]
+      "tags": ["clerk", "telegram", "agents", "ops"]
     }
   ]
 }
