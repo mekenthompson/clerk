@@ -33,6 +33,7 @@ interface Fixture {
     chat_id: string
     text: string
     done?: boolean
+    lane?: string
   }) => Promise<{ messageId: number | null; status: string }>
   /**
    * Fire-and-forget variant: starts handleStreamReply but doesn't await it.
@@ -43,11 +44,12 @@ interface Fixture {
     chat_id: string
     text: string
     done?: boolean
+    lane?: string
   }) => Promise<{ messageId: number | null; status: string }>
   turnEnd: () => void
 }
 
-function setup(): Fixture {
+function setup(opts: { progressCardActive?: boolean } = {}): Fixture {
   const bot = createMockBot()
   const map = new Map<string, DraftStreamHandle>()
   const suppress = new Set<string>()
@@ -61,14 +63,27 @@ function setup(): Fixture {
     suppressPtyPreview: suppress,
     lastPtyPreviewByChat: lastPreview,
   }
-  const srState: StreamReplyState = { activeDraftStreams: map }
+  // Only wire suppressPtyPreview into stream_reply state when checklist
+  // mode is active. Legacy (PTY-tail) tests assert that a PTY partial
+  // arriving after stream_reply started feeds into the same stream via
+  // 'update-existing'; in checklist mode stream_reply claims the
+  // suppress slot first so the PTY handler would short-circuit to
+  // 'suppressed' instead. Keep the two worlds separate.
+  const srState: StreamReplyState = opts.progressCardActive === true
+    ? { activeDraftStreams: map, suppressPtyPreview: suppress }
+    : { activeDraftStreams: map }
 
   const pty = createPtyPartialHandler(ptyState, {
     bot,
     renderText: (t) => `<i>${t}</i>`, // PTY preview: italic
   })
 
-  const callStreamReply = (args: { chat_id: string; text: string; done?: boolean }) =>
+  const callStreamReply = (args: {
+    chat_id: string
+    text: string
+    done?: boolean
+    lane?: string
+  }) =>
     handleStreamReply(args, srState, {
       bot,
       markdownToHtml: (t) => `<b>${t}</b>`, // stream_reply: bold
@@ -85,6 +100,7 @@ function setup(): Fixture {
       recordOutbound: () => {},
       writeError: () => {},
       throttleMs: 600,
+      progressCardActive: opts.progressCardActive === true,
     })
 
   const turnEnd = () => {
@@ -239,6 +255,121 @@ describe('streaming e2e smoke', () => {
 
     expect(f.map.has('A:_')).toBe(false)
     expect(f.map.has('B:_')).toBe(true)
+  })
+
+  it('checklist mode: default-lane done=false is suppressed (no Telegram traffic)', async () => {
+    // Reproduces the user-visible bug: in checklist mode (production
+    // default via CLERK_TG_STREAM_MODE=checklist), mid-turn stream_reply
+    // calls on the default lane must be silently suppressed so the
+    // progress card owns the mid-turn surface without a duplicate
+    // narrative message. Only the final done=true call posts.
+    holder.current = setup({ progressCardActive: true })
+    const f = holder.current
+
+    const r1 = await f.fireStreamReply({ chat_id: '42', text: 'looking into this…' })
+    await microtaskFlush()
+
+    expect(r1.status).toBe('updated')
+    expect(r1.messageId).toBeNull()
+    expect(f.bot.api.sendMessage).not.toHaveBeenCalled()
+    expect(f.bot.api.editMessageText).not.toHaveBeenCalled()
+    // PTY preview slot is claimed even when suppressed — stops a late
+    // PTY partial from leaking a raw-TUI draft.
+    expect(f.suppress.has('42:_')).toBe(true)
+  })
+
+  it('checklist mode: named lane (thinking) is honored end-to-end', async () => {
+    // Escape hatch for agents that DO want a live mid-turn text surface
+    // in checklist mode: call with lane:"thinking" (or any named lane).
+    // Named-lane calls bypass the default-lane suppression.
+    holder.current = setup({ progressCardActive: true })
+    const f = holder.current
+
+    const p1 = f.fireStreamReply({ chat_id: '42', text: 'reading config…', lane: 'thinking' })
+    await microtaskFlush()
+    const r1 = await p1
+
+    expect(r1.status).toBe('updated')
+    expect(f.bot.api.sendMessage).toHaveBeenCalledTimes(1)
+    expect(f.bot.api.sendMessage.mock.calls[0][0]).toBe('42')
+    expect(f.bot.api.sendMessage.mock.calls[0][1]).toBe('<b>reading config…</b>')
+
+    vi.advanceTimersByTime(1000)
+    await microtaskFlush()
+    const p2 = f.fireStreamReply({ chat_id: '42', text: 'now grepping…', lane: 'thinking' })
+    await microtaskFlush()
+    await p2
+
+    // Second chunk edits the same message — one send, one edit.
+    expect(f.bot.api.sendMessage).toHaveBeenCalledTimes(1)
+    expect(f.bot.api.editMessageText).toHaveBeenCalledTimes(1)
+    expect(f.map.has('42:_:thinking')).toBe(true)
+  })
+
+  it('checklist mode: final done=true on default lane posts the answer', async () => {
+    // After N suppressed intermediates, the terminal done=true still
+    // needs to actually post — that's the answer message. This is the
+    // single most important invariant in checklist mode and the thing
+    // that would silently break under a regression.
+    holder.current = setup({ progressCardActive: true })
+    const f = holder.current
+
+    // Intermediate suppressed call.
+    await f.fireStreamReply({ chat_id: '1', text: 'working…' })
+    await microtaskFlush()
+    expect(f.bot.api.sendMessage).not.toHaveBeenCalled()
+
+    // Terminal call — must send.
+    vi.advanceTimersByTime(1000)
+    await microtaskFlush()
+    const pdone = f.fireStreamReply({ chat_id: '1', text: 'THE ANSWER', done: true })
+    await microtaskFlush()
+    await pdone
+
+    expect(f.bot.api.sendMessage).toHaveBeenCalledTimes(1)
+    expect(f.bot.api.sendMessage.mock.calls[0][1]).toBe('<b>THE ANSWER</b>')
+    expect(f.map.has('1:_')).toBe(false)
+  })
+
+  it('checklist mode: named lane + final default-lane answer coexist as two messages', async () => {
+    // Full production shape in checklist mode when an agent opts in to a
+    // live "thinking" lane: the thinking lane streams edits to message A,
+    // the final done=true default-lane call posts message B (the
+    // answer). Two distinct Telegram messages for one turn, each with
+    // the right text, no cross-talk.
+    holder.current = setup({ progressCardActive: true })
+    const f = holder.current
+
+    const pThink = f.fireStreamReply({ chat_id: '1', text: 'thinking step 1…', lane: 'thinking' })
+    await microtaskFlush()
+    await pThink
+
+    vi.advanceTimersByTime(1000)
+    await microtaskFlush()
+    const pThink2 = f.fireStreamReply({ chat_id: '1', text: 'thinking step 2…', lane: 'thinking' })
+    await microtaskFlush()
+    await pThink2
+
+    // Suppressed intermediate on default lane — no extra send.
+    await f.fireStreamReply({ chat_id: '1', text: 'almost done' })
+    await microtaskFlush()
+
+    vi.advanceTimersByTime(1000)
+    await microtaskFlush()
+    const pAnswer = f.fireStreamReply({ chat_id: '1', text: 'Here is the answer.', done: true })
+    await microtaskFlush()
+    await pAnswer
+
+    // Two distinct Telegram messages sent: one for 'thinking', one for
+    // the final answer. The intermediate default-lane call did NOT send.
+    expect(f.bot.api.sendMessage).toHaveBeenCalledTimes(2)
+    const sendTexts = f.bot.api.sendMessage.mock.calls.map(c => c[1])
+    expect(sendTexts).toContain('<b>thinking step 1…</b>')
+    expect(sendTexts).toContain('<b>Here is the answer.</b>')
+    // Thinking lane got an edit for step 2.
+    expect(f.bot.api.editMessageText).toHaveBeenCalled()
+    const editTexts = f.bot.api.editMessageText.mock.calls.map(c => c[2])
+    expect(editTexts).toContain('<b>thinking step 2…</b>')
   })
 
   it('done=true with changed text flushes the final edit before clearing', async () => {
